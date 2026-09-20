@@ -11,3 +11,7 @@ dist/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+
+# Crash reports from local runs.
+crashlog/
+comiccleaner-selftest.txt

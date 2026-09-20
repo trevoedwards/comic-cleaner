@@ -40,6 +40,7 @@ review what it found, and apply.
 - [Safety](#safety)
 - [Backups](#backups)
 - [Building a portable binary](#building-a-portable-binary)
+- [When something goes wrong](#when-something-goes-wrong)
 - [Development](#development)
 - [Project layout](#project-layout)
 - [Credits](#credits)
@@ -237,6 +238,21 @@ What you get:
 > it targets. CI does all three on every push and uploads them as artifacts. A
 > packaged build still needs 7-Zip or `unrar` on the target machine for `.cbr` /
 > `.cb7`; `.cbz` works standalone.
+
+## When something goes wrong
+
+If the app hits an unhandled error it writes a full report to a **`crashlog`
+folder beside wherever it was launched from**, then tells you where it went.
+Each report carries the traceback, the app and Qt versions, the platform, which
+archive tools were detected, and the last couple of hundred log lines leading up
+to the failure — enough to act on without needing to reproduce it.
+
+If the launch folder is read-only (a binary in `Program Files` or `/usr/bin`),
+the report falls back to the app's data directory rather than being lost.
+`--self-test` prints the location either way.
+
+Crashes on background scan and removal threads are recorded too, which they
+would not be otherwise — a thread that dies takes its traceback with it.
 
 ## Development
 

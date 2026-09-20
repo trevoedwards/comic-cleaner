@@ -16,8 +16,21 @@ from ..core.remover import (
     apply_removals,
 )
 from ..core.scanner import scan_archives
+from ..crashlog import write_report
 
 log = logging.getLogger(__name__)
+
+
+def _record(exc: Exception, worker: str) -> None:
+    """Save a crash report for a worker failure.
+
+    These are caught so the UI survives, which means they never reach the
+    global excepthook - without this they would leave nothing on disk.
+    """
+    try:
+        write_report(type(exc), exc, exc.__traceback__, thread=worker)
+    except Exception:
+        log.debug("could not write a crash report", exc_info=True)
 
 
 class ScanWorker(QThread):
@@ -51,6 +64,7 @@ class ScanWorker(QThread):
             )
         except Exception as exc:
             log.exception("scan worker crashed")
+            _record(exc, "ScanWorker")
             self.failed.emit(str(exc))
             return
         self.finished_scan.emit(results)
@@ -97,6 +111,7 @@ class RemovalWorker(QThread):
             )
         except Exception as exc:
             log.exception("removal worker crashed")
+            _record(exc, "RemovalWorker")
             self.failed.emit(str(exc))
             return
         self.finished_removal.emit(report)

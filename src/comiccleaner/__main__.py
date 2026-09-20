@@ -35,6 +35,11 @@ def main(argv: list[str] | None = None) -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
+    # Installed before anything else can fail, so even a startup crash is saved.
+    from comiccleaner import crashlog
+
+    crashlog.install()
+
     if args.self_test:
         return run_self_test(args.paths)
 
@@ -53,11 +58,40 @@ def main(argv: list[str] | None = None) -> int:
     # Set before any window exists so the taskbar entry picks it up.
     app.setWindowIcon(app_icon())
 
+    # Now that there is a GUI, crashes can also be reported to the user.
+    crashlog.install(notifier=_report_crash_to_user)
+
     window = MainWindow()
     window.show()
     if args.paths:
         window.import_paths(args.paths)
     return app.exec()
+
+
+def _report_crash_to_user(path: Path | None, summary: str) -> None:
+    """Tell the user a crash was recorded, and where it went.
+
+    A windowed build has no console, so without this the app would simply
+    vanish with no explanation of where to look.
+    """
+    try:
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
+        if QApplication.instance() is None:
+            return
+        where = (
+            f"A crash report was saved to:\n{path}"
+            if path is not None
+            else "The crash report could not be saved - the launch folder is not writable."
+        )
+        box = QMessageBox()
+        box.setIcon(QMessageBox.Icon.Critical)
+        box.setWindowTitle("Comic Cleaner stopped unexpectedly")
+        box.setText(f"{summary}\n\n{where}")
+        box.setStandardButtons(QMessageBox.StandardButton.Close)
+        box.exec()
+    except Exception:
+        pass
 
 
 def run_self_test(paths: list[Path]) -> int:
@@ -100,6 +134,13 @@ def run_self_test(paths: list[Path]) -> int:
     # --add-data paths are easy to get wrong, and a missing icon is silent.
     found_icon = icon_path()
     emit(f"  app icon        {found_icon or 'NOT BUNDLED'}")
+
+    from comiccleaner import crashlog
+
+    emit(f"  crash reports   {crashlog.crash_dir(create=False)}")
+    reports = crashlog.existing_reports()
+    if reports:
+        emit(f"  {len(reports)} existing report(s), newest {reports[0].name}")
 
     # Prove the image codecs we depend on survived packaging.
     try:
