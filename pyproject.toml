@@ -9,6 +9,24 @@ description = "Find and remove duplicate/injected pages (ads, scanlation credits
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+authors = [{ name = "Trevor Edwards" }]
+keywords = ["comics", "cbz", "cbr", "duplicate", "deduplication", "perceptual-hash"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications :: Qt",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: MacOS X",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+    "Topic :: Utilities",
+]
 
 dependencies = [
     "PySide6>=6.6",
@@ -26,6 +44,10 @@ dev = [
 build = [
     "pyinstaller>=6.3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/trevoedwards/comic-cleaner"
+Issues = "https://github.com/trevoedwards/comic-cleaner/issues"
 
 [project.scripts]
 comiccleaner = "comiccleaner.__main__:main"

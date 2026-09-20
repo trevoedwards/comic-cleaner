@@ -16,8 +16,12 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# No console window flash on Windows when we shell out.
-_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+# Suppress the console window flash when shelling out on Windows. The keyword
+# does not exist on POSIX, so it is passed as **kwargs rather than as a literal
+# zero, which only happens to be tolerated.
+_QUIET_LAUNCH: dict[str, int] = (
+    {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+)
 
 _SEVENZIP_CANDIDATES = [
     r"C:\Program Files\7-Zip\7z.exe",
@@ -77,7 +81,7 @@ def bsdtar_path() -> str | None:
                 capture_output=True,
                 text=True,
                 timeout=10,
-                creationflags=_NO_WINDOW,
+                **_QUIET_LAUNCH,
             ).stdout
         except (OSError, subprocess.SubprocessError):
             continue
@@ -105,7 +109,7 @@ def _run(cmd: list[str], *, timeout: int = 600) -> subprocess.CompletedProcess[b
         cmd,
         capture_output=True,
         timeout=timeout,
-        creationflags=_NO_WINDOW,
+        **_QUIET_LAUNCH,
     )
 
 

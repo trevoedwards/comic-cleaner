@@ -8,12 +8,14 @@
 
 Ads, scanlation credits and "read more at…" filler — gone, in bulk, across a whole series.
 
+[![CI](https://github.com/trevoedwards/comic-cleaner/actions/workflows/ci.yml/badge.svg)](https://github.com/trevoedwards/comic-cleaner/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![PySide6](https://img.shields.io/badge/GUI-PySide6-41CD52?logo=qt&logoColor=white)](https://doc.qt.io/qtforpython/)
-[![Platform](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)](#requirements)
-[![Tests](https://img.shields.io/badge/tests-pytest-0A9EDC?logo=pytest&logoColor=white)](#development)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#requirements)
 [![Ruff](https://img.shields.io/badge/lint-ruff-D7FF64?logo=ruff&logoColor=black)](https://docs.astral.sh/ruff/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+<img src="docs/screenshot.png" alt="Comic Cleaner main window" width="900">
 
 </div>
 
@@ -37,7 +39,7 @@ review what it found, and apply.
 - [Settings reference](#settings-reference)
 - [Safety](#safety)
 - [Backups](#backups)
-- [Building a portable .exe](#building-a-portable-exe)
+- [Building a portable binary](#building-a-portable-binary)
 - [Development](#development)
 - [Project layout](#project-layout)
 - [Credits](#credits)
@@ -56,7 +58,7 @@ matches by exactly that, so the worst offenders surface first.
 ## Features
 
 - **Reads what you already have** — `.cbz` / `.zip` natively, plus `.cbr` /
-  `.rar` / `.cb7` / `.7z` through 7-Zip or WinRAR if either is installed.
+  `.rar` / `.cb7` / `.7z` through 7-Zip, `unrar` or WinRAR if any is installed.
 - **Two kinds of matching** — a SHA-256 of the stored bytes finds identical
   copies; a 64-bit perceptual hash finds the same advert re-encoded, rescaled or
   recompressed.
@@ -74,33 +76,38 @@ matches by exactly that, so the worst offenders surface first.
 
 | | |
 |---|---|
-| **Python** | 3.10 or newer (developed and tested on 3.12) |
-| **OS** | Windows. The code avoids platform-specific APIs and should run on Linux and macOS, but neither is tested. |
-| **Optional** | [7-Zip](https://www.7-zip.org/) or WinRAR, only for `.cbr` / `.cb7`. Found automatically on `PATH` or in the usual install folders; **Settings → Archive tools** shows what was detected. |
+| **Python** | 3.10 or newer (developed on 3.12) |
+| **OS** | Windows, macOS and Linux. All three are built and tested in [CI](.github/workflows/ci.yml). |
+| **Optional** | [7-Zip](https://www.7-zip.org/), `unrar` or WinRAR, only for `.cbr` / `.cb7`. Found automatically on `PATH` or in the usual install folders; **Settings → Archive tools** shows what was detected. |
 
 Everything else is three pip packages — PySide6, Pillow and numpy — installed
 into a project-local `.venv`. Nothing lands on your system Python.
 
 ## Install
 
+```bash
+python -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"      # macOS, Linux
+```
+
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
 
-Or grab a prebuilt `ComicCleaner.exe` and skip all of the above — see
-[Building a portable .exe](#building-a-portable-exe).
+Or grab a prebuilt binary and skip all of the above — see
+[Building a portable binary](#building-a-portable-binary).
 
 ## Quick start
 
-```powershell
-.\.venv\Scripts\python.exe -m comiccleaner
+```bash
+python -m comiccleaner
 ```
 
 Optionally pass paths to import on launch:
 
-```powershell
-.\.venv\Scripts\python.exe -m comiccleaner "D:\Comics\Some Series"
+```bash
+python -m comiccleaner "/path/to/comics"
 ```
 
 Then:
@@ -174,8 +181,8 @@ Removal is the only destructive operation, and it is deliberately paranoid:
 - It **refuses to remove every page** from an archive.
 - It **refuses to act on a stale plan**: if an archive changed on disk since the
   scan, it is skipped rather than mangled.
-- If a file is open in another program, Windows blocks the swap; the app says so
-  and leaves that archive alone.
+- If a file is locked by another program, the swap is abandoned and the app says
+  so, leaving that archive alone.
 
 > [!WARNING]
 > `.cbr` and `.cb7` cannot be written to — the formats are read-only in every
@@ -199,37 +206,43 @@ deal with them:
 You can also point **Settings → Backup folder** somewhere else to keep them out
 of your comics directory entirely.
 
-## Building a portable .exe
+## Building a portable binary
 
-```powershell
-.\build.ps1
+One script covers all three platforms:
+
+```bash
+python build.py --clean --smoke-test
 ```
 
-Produces `dist\ComicCleaner.exe` — a single self-contained file, no installer.
-Useful switches:
+Thin wrappers exist for convenience — `build.ps1` on Windows, `build.sh` on
+macOS and Linux — forwarding the same options:
 
-| Switch | Effect |
+| Option | Effect |
 |---|---|
-| `-OneDir` | Emit a folder instead of one file. Starts faster, easier to debug. |
-| `-Console` | Keep the console window so tracebacks are visible. |
-| `-Clean` | Wipe `build\` and `dist\` first. |
+| `--onedir` | Emit a folder instead of one file. Starts faster, easier to debug. |
+| `--console` | Keep the console so tracebacks are visible. |
+| `--clean` | Wipe `build/` and `dist/` first. |
+| `--smoke-test` | Launch the result and fail on an early exit or any traceback. |
 
-Then verify it actually runs:
+What you get:
 
-```powershell
-.\smoke-test.ps1
-```
+| Platform | Output | Icon |
+|---|---|---|
+| Windows | `dist/ComicCleaner.exe` | embedded `.ico` |
+| macOS | `dist/ComicCleaner.app` | embedded `.icns` |
+| Linux | `dist/ComicCleaner` | from the bundled PNG at runtime |
 
 > [!NOTE]
-> PyInstaller cannot cross-compile, so a Windows binary must be built on
-> Windows. The bundled `.exe` still needs 7-Zip or WinRAR on the target machine
-> for `.cbr` / `.cb7`; `.cbz` works standalone.
+> PyInstaller **cannot cross-compile** — each binary has to be built on the OS
+> it targets. CI does all three on every push and uploads them as artifacts. A
+> packaged build still needs 7-Zip or `unrar` on the target machine for `.cbr` /
+> `.cb7`; `.cbz` works standalone.
 
 ## Development
 
-```powershell
-.\.venv\Scripts\python.exe -m pytest      # core + offscreen GUI tests
-.\.venv\Scripts\python.exe -m ruff check .
+```bash
+python -m pytest        # core + offscreen GUI tests
+python -m ruff check .
 ```
 
 The GUI tests drive the real window through Qt's `offscreen` platform, so the
@@ -237,8 +250,8 @@ whole suite runs without a display.
 
 To check a *packaged* build without a display:
 
-```powershell
-.\dist\ComicCleaner.exe --self-test "D:\Comics\Some Series"
+```bash
+./dist/ComicCleaner --self-test "/path/to/comics"
 ```
 
 It reports the archive tools found, whether the icon was bundled, which Pillow
@@ -255,7 +268,7 @@ src/comiccleaner/
 ├── resources.py     asset lookup that also works inside a PyInstaller bundle
 ├── core/            no Qt imports — fully testable headless
 │   ├── archive.py     read cbz/cbr/cb7, write cbz
-│   ├── extern.py      locate and drive 7-Zip / UnRAR
+│   ├── extern.py      locate and drive 7-Zip / unrar
 │   ├── hashing.py     content SHA + perceptual dHash
 │   ├── scanner.py     walk archives and hash pages, in parallel
 │   ├── cache.py       SQLite hash cache and ignore list
