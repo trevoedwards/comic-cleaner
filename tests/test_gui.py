@@ -16,9 +16,9 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import QCoreApplication, QSettings  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from comicdedupe.core.archive import is_page_name  # noqa: E402
-from comicdedupe.core.model import Decision  # noqa: E402
-from comicdedupe.gui.main_window import MainWindow, human_bytes  # noqa: E402
+from comiccleaner.core.archive import is_page_name  # noqa: E402
+from comiccleaner.core.model import Decision  # noqa: E402
+from comiccleaner.gui.main_window import MainWindow, human_bytes  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -34,7 +34,7 @@ def window(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
     monkeypatch.setattr(QSettings, "sync", lambda self: None)
     monkeypatch.setattr(
-        "comicdedupe.gui.main_window.cache_path", lambda: tmp_path / "cache.sqlite"
+        "comiccleaner.gui.main_window.cache_path", lambda: tmp_path / "cache.sqlite"
     )
 
     win = MainWindow()
@@ -65,11 +65,11 @@ def apply_and_wait(window: MainWindow, monkeypatch, *, dry_run: bool = False) ->
     from PySide6.QtWidgets import QDialog, QMessageBox
 
     monkeypatch.setattr(
-        "comicdedupe.gui.main_window._ConfirmDialog.exec",
+        "comiccleaner.gui.main_window._ConfirmDialog.exec",
         lambda self: QDialog.DialogCode.Accepted,
     )
     monkeypatch.setattr(
-        "comicdedupe.gui.main_window._ConfirmDialog.dry_run", lambda self: dry_run
+        "comiccleaner.gui.main_window._ConfirmDialog.dry_run", lambda self: dry_run
     )
     monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.StandardButton.Ok)
 

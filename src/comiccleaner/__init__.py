@@ -2,7 +2,7 @@
 
 __version__ = "0.1.0"
 
-APP_NAME = "Comic Duplicate Page Remover"
+APP_NAME = "Comic Cleaner"
 AUTHOR = "Trevor Edwards"
 ORGANISATION = "Playback Software"
 GITHUB_URL = "https://git.playbacksoftware.com/"

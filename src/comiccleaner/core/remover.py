@@ -268,7 +268,7 @@ def apply_plan(
         return result
 
     tmp_fd, tmp_name = tempfile.mkstemp(
-        dir=str(destination.parent), prefix=".comicdedupe-", suffix=".cbz"
+        dir=str(destination.parent), prefix=".comiccleaner-", suffix=".cbz"
     )
     os.close(tmp_fd)
     tmp_path = Path(tmp_name)

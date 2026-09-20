@@ -5,21 +5,21 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
-from comicdedupe.core import grouping
-from comicdedupe.core.archive import ComicArchive, is_page_name, natural_key
-from comicdedupe.core.cache import HashCache
-from comicdedupe.core.comicinfo import update_comicinfo
-from comicdedupe.core.grouping import GroupingOptions, build_groups
-from comicdedupe.core.hashing import digest_image, hamming
-from comicdedupe.core.model import Decision, MatchKind
-from comicdedupe.core.remover import (
+from comiccleaner.core import grouping
+from comiccleaner.core.archive import ComicArchive, is_page_name, natural_key
+from comiccleaner.core.cache import HashCache
+from comiccleaner.core.comicinfo import update_comicinfo
+from comiccleaner.core.grouping import GroupingOptions, build_groups
+from comiccleaner.core.hashing import digest_image, hamming
+from comiccleaner.core.model import Decision, MatchKind
+from comiccleaner.core.remover import (
     BackupPolicy,
     RemovalPlan,
     apply_plan,
     apply_removals,
     build_plans,
 )
-from comicdedupe.core.scanner import find_archives, scan_archive, scan_archives
+from comiccleaner.core.scanner import find_archives, scan_archive, scan_archives
 
 from .conftest import make_flat_page, make_page, write_archive
 

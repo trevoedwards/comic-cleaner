@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "comicdedupe"
+name = "comiccleaner"
 version = "0.1.0"
 description = "Find and remove duplicate/injected pages (ads, scanlation credits) across comic archives"
 readme = "README.md"
@@ -28,7 +28,7 @@ build = [
 ]
 
 [project.scripts]
-comicdedupe = "comicdedupe.__main__:main"
+comiccleaner = "comiccleaner.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -44,7 +44,7 @@ ignore = ["B008"]
 
 [tool.mypy]
 python_version = "3.10"
-packages = ["comicdedupe"]
+packages = ["comiccleaner"]
 mypy_path = "src"
 ignore_missing_imports = true
 warn_unused_ignores = true

@@ -1,5 +1,5 @@
 <#
-Smoke-tests a built comicdedupe.exe.
+Smoke-tests a built ComicCleaner.exe.
 
 A PyInstaller build can succeed and still produce a binary that dies on startup
 from a missing or unresolvable import, so this launches the real executable and
@@ -7,7 +7,7 @@ checks both that it survives and that it printed no traceback.
 #>
 [CmdletBinding()]
 param(
-    [string]$Exe = 'dist\comicdedupe.exe',
+    [string]$Exe = 'dist\ComicCleaner.exe',
     [int]$Seconds = 15
 )
 

@@ -16,16 +16,16 @@ from PySide6.QtCore import QCoreApplication, QSettings  # noqa: E402
 from PySide6.QtGui import QPalette  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from comicdedupe import GITHUB_URL  # noqa: E402
-from comicdedupe.core.model import Decision  # noqa: E402
-from comicdedupe.gui.about import AboutDialog  # noqa: E402
-from comicdedupe.gui.main_window import (  # noqa: E402
+from comiccleaner import GITHUB_URL  # noqa: E402
+from comiccleaner.core.model import Decision  # noqa: E402
+from comiccleaner.gui.about import AboutDialog  # noqa: E402
+from comiccleaner.gui.main_window import (  # noqa: E402
     PANEL_FOOTER_HEIGHT,
     PANEL_HEADER_HEIGHT,
     MainWindow,
 )
-from comicdedupe.gui.settings import AppSettings  # noqa: E402
-from comicdedupe.gui.theme import Theme, apply_theme, colour, effective_is_dark  # noqa: E402
+from comiccleaner.gui.settings import AppSettings  # noqa: E402
+from comiccleaner.gui.theme import Theme, apply_theme, colour, effective_is_dark  # noqa: E402
 
 from .test_gui import apply_and_wait, pump_until, scan_and_wait  # noqa: E402
 
@@ -41,7 +41,7 @@ def window(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
     monkeypatch.setattr(QSettings, "sync", lambda self: None)
     monkeypatch.setattr(
-        "comicdedupe.gui.main_window.cache_path", lambda: tmp_path / "cache.sqlite"
+        "comiccleaner.gui.main_window.cache_path", lambda: tmp_path / "cache.sqlite"
     )
     win = MainWindow()
     yield win
@@ -256,7 +256,7 @@ def test_auto_cleanup_keeps_backups_when_something_failed(window, library, monke
             result.error = "simulated failure"
         return result
 
-    import comicdedupe.core.remover as remover
+    import comiccleaner.core.remover as remover
 
     real_apply = remover.apply_plan
     monkeypatch.setattr(remover, "apply_plan", failing_apply)
@@ -273,7 +273,7 @@ def test_auto_cleanup_keeps_backups_when_something_failed(window, library, monke
 def test_icon_asset_is_present_and_square():
     from PIL import Image
 
-    from comicdedupe.resources import icon_path
+    from comiccleaner.resources import icon_path
 
     found = icon_path()
     assert found is not None, "bundled icon.png is missing"
@@ -283,8 +283,8 @@ def test_icon_asset_is_present_and_square():
 
 
 def test_windows_ico_exists_for_the_build():
-    ico = Path(__file__).resolve().parents[1] / "assets" / "comicdedupe.ico"
-    assert ico.is_file(), "assets/comicdedupe.ico is needed by build.ps1"
+    ico = Path(__file__).resolve().parents[1] / "assets" / "comiccleaner.ico"
+    assert ico.is_file(), "assets/comiccleaner.ico is needed by build.ps1"
 
 
 def test_window_has_an_icon(window):

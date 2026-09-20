@@ -105,7 +105,7 @@ class ComicArchive:
             raise ArchiveError(f"Unrecognised archive format: {self.path.name}")
 
     def _extract_to_temp(self) -> None:
-        tmp = Path(tempfile.mkdtemp(prefix="comicdedupe-"))
+        tmp = Path(tempfile.mkdtemp(prefix="comiccleaner-"))
         self._tmpdir = tmp
         try:
             extract_all(self.path, tmp, kind=self.kind.value)

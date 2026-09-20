@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import GITHUB_URL
+from .. import APP_NAME, GITHUB_URL
 from ..core.archive import ARCHIVE_SUFFIXES
 from ..core.cache import HashCache
 from ..core.grouping import build_groups, sort_groups, summarise
@@ -83,7 +83,7 @@ def human_bytes(count: int) -> str:
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Comic Duplicate Page Remover")
+        self.setWindowTitle(APP_NAME)
         self.resize(1400, 860)
         self.setAcceptDrops(True)
 

@@ -11,7 +11,7 @@ from pathlib import Path
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="comicdedupe",
+        prog="comiccleaner",
         description="Find and remove duplicate pages (ads, injected images) "
         "across comic archives.",
     )
@@ -43,12 +43,13 @@ def main(argv: list[str] | None = None) -> int:
     # where there is no parent package for a relative import to resolve against.
     from PySide6.QtWidgets import QApplication
 
-    from comicdedupe.gui.main_window import MainWindow
-    from comicdedupe.resources import app_icon
+    from comiccleaner import APP_NAME, ORGANISATION
+    from comiccleaner.gui.main_window import MainWindow
+    from comiccleaner.resources import app_icon
 
     app = QApplication(sys.argv[:1])
-    app.setApplicationName("comicdedupe")
-    app.setOrganizationName("comic-tools")
+    app.setApplicationName(APP_NAME)
+    app.setOrganizationName(ORGANISATION)
     # Set before any window exists so the taskbar entry picks it up.
     app.setWindowIcon(app_icon())
 
@@ -69,9 +70,9 @@ def run_self_test(paths: list[Path]) -> int:
     A windowed PyInstaller build has no stdout, so the report falls back to a
     file; otherwise this would be unusable on exactly the build people ship.
     """
-    from comicdedupe.core.extern import describe_backends
-    from comicdedupe.core.grouping import GroupingOptions, build_groups
-    from comicdedupe.core.scanner import find_archives, scan_archives
+    from comiccleaner.core.extern import describe_backends
+    from comiccleaner.core.grouping import GroupingOptions, build_groups
+    from comiccleaner.core.scanner import find_archives, scan_archives
 
     lines: list[str] = []
 
@@ -83,14 +84,15 @@ def run_self_test(paths: list[Path]) -> int:
 
     def finish(code: int) -> int:
         if sys.stdout is None:
-            report = Path.cwd() / "comicdedupe-selftest.txt"
+            report = Path.cwd() / "comiccleaner-selftest.txt"
             with contextlib.suppress(OSError):
                 report.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return code
 
-    from comicdedupe.resources import icon_path
+    from comiccleaner import APP_NAME
+    from comiccleaner.resources import icon_path
 
-    emit(f"comicdedupe self-test (frozen={getattr(sys, 'frozen', False)})")
+    emit(f"{APP_NAME} self-test (frozen={getattr(sys, 'frozen', False)})")
 
     for name, found in describe_backends().items():
         emit(f"  archive tool {name:8} {found or 'not found'}")

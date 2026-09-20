@@ -17,7 +17,7 @@ def asset_root() -> Path:
     """
     bundled = getattr(sys, "_MEIPASS", None)
     if bundled:
-        return Path(bundled) / "comicdedupe" / ASSET_DIR_NAME
+        return Path(bundled) / "comiccleaner" / ASSET_DIR_NAME
     return Path(__file__).resolve().parent / ASSET_DIR_NAME
 
 

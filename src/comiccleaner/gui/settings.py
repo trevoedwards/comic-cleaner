@@ -24,13 +24,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import APP_NAME, ORGANISATION
 from ..core.extern import describe_backends
 from ..core.grouping import GroupingOptions
 from ..core.remover import BackupPolicy
 from .theme import Theme
 
-ORG = "comic-tools"
-APP = "comicdedupe"
+ORG = ORGANISATION
+APP = APP_NAME
 
 # Above roughly a quarter of the 64 bits, "similar" stops meaning anything.
 MAX_THRESHOLD = 16
@@ -114,15 +115,26 @@ def _as_bool(value: object) -> bool:
     return str(value).lower() in ("true", "1", "yes")
 
 
-def cache_path() -> Path:
-    """Where the hash cache lives - next to the app's other user data."""
+def data_dir() -> Path:
+    """Per-user data folder for the app.
+
+    Built from GenericDataLocation plus the org and app names rather than from
+    AppDataLocation, because Qt only folds those names into AppDataLocation once
+    QApplication has been configured - so anything touching it earlier would
+    drop files loose in the user's roaming folder.
+    """
     from PySide6.QtCore import QStandardPaths
 
     base = QStandardPaths.writableLocation(
-        QStandardPaths.StandardLocation.AppDataLocation
+        QStandardPaths.StandardLocation.GenericDataLocation
     )
-    root = Path(base) if base else Path.home() / ".comicdedupe"
-    return root / "hashes.sqlite"
+    root = Path(base) if base else Path.home() / ".local" / "share"
+    return root / ORG / APP
+
+
+def cache_path() -> Path:
+    """Where the hash cache and ignore list live."""
+    return data_dir() / "hashes.sqlite"
 
 
 class _FolderPicker(QWidget):

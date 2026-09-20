@@ -1,5 +1,5 @@
 <#
-Builds dist\comicdedupe.exe - a single portable file, no installer.
+Builds dist\ComicCleaner.exe - a single portable file, no installer.
 
 PyInstaller cannot cross-compile, so this has to run on Windows. Everything it
 needs comes from the project-local .venv.
@@ -76,25 +76,25 @@ $excluded = @(
 $arguments = @(
     '-m', 'PyInstaller',
     '--noconfirm',
-    '--name', 'comicdedupe',
+    '--name', 'ComicCleaner',
     '--paths', 'src',
-    '--collect-submodules', 'comicdedupe',
+    '--collect-submodules', 'comiccleaner',
     # --collect-submodules only gathers code, so the icon needs saying too.
-    '--add-data', 'src/comicdedupe/assets;comicdedupe/assets'
+    '--add-data', 'src/comiccleaner/assets;comiccleaner/assets'
 )
 $arguments += if ($OneDir) { '--onedir' } else { '--onefile' }
 $arguments += if ($Console) { '--console' } else { '--windowed' }
 foreach ($module in $excluded) { $arguments += @('--exclude-module', $module) }
 
-$icon = Join-Path $PSScriptRoot 'assets\comicdedupe.ico'
+$icon = Join-Path $PSScriptRoot 'assets\comiccleaner.ico'
 if (Test-Path $icon) { $arguments += @('--icon', $icon) }
 
-$arguments += 'src\comicdedupe\__main__.py'
+$arguments += 'src\comiccleaner\__main__.py'
 
 Write-Host 'Building (this takes a few minutes)...' -ForegroundColor Cyan
 Invoke-Native -File $python -Arguments $arguments -What 'PyInstaller'
 
-$output = if ($OneDir) { 'dist\comicdedupe\comicdedupe.exe' } else { 'dist\comicdedupe.exe' }
+$output = if ($OneDir) { 'dist\ComicCleaner\ComicCleaner.exe' } else { 'dist\ComicCleaner.exe' }
 if (-not (Test-Path $output)) { throw "Build reported success but $output is missing." }
 
 $sizeMb = [math]::Round((Get-Item $output).Length / 1MB, 1)
