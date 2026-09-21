@@ -13,7 +13,14 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .archive import ArchiveError, ComicArchive, detect_kind, is_page_name, write_cbz
+from .archive import (
+    ARCHIVE_SUFFIXES,
+    ArchiveError,
+    ComicArchive,
+    detect_kind,
+    is_page_name,
+    write_cbz,
+)
 from .comicinfo import find_comicinfo, update_comicinfo
 from .model import ArchiveKind, DuplicateGroup
 
@@ -105,6 +112,23 @@ def build_plans(
     ]
     plans.sort(key=lambda p: str(p.archive).lower())
     return plans
+
+
+def is_backup_name(name: str, suffix: str = ".bak") -> bool:
+    """True if `name` is a backup this app could have made.
+
+    Backups are "<archive name><suffix>", optionally followed by ".<n>" when an
+    earlier backup was in the way. Matching on the suffix alone would also catch
+    real comics whose titles merely contain ".bak" somewhere.
+    """
+    lowered = name.lower()
+    suffix = suffix.lower()
+    stem, dot, tail = lowered.rpartition(".")
+    if dot and tail.isdecimal() and stem.endswith(suffix):
+        lowered = stem
+    if not lowered.endswith(suffix):
+        return False
+    return Path(lowered[: -len(suffix)]).suffix in ARCHIVE_SUFFIXES
 
 
 def _backup_path(archive: Path, policy: BackupPolicy) -> Path:
@@ -257,15 +281,19 @@ def apply_plan(
         destination = destination.with_suffix(".cbz")
     result.output = destination
 
-    if dry_run:
-        return result
-
-    replacing_in_place = output_dir is None
-    if not replacing_in_place and destination.exists():
+    # Checked before the dry-run exit so a dry run reports the same refusal a real
+    # run would hit. Converting book.cbr lands on book.cbz, which may already be a
+    # different book sitting next to it.
+    if destination != plan.archive and destination.exists():
         result.error = f"refusing to overwrite existing file: {destination.name}"
         result.removed = 0
         result.bytes_freed = 0
         return result
+
+    if dry_run:
+        return result
+
+    replacing_in_place = output_dir is None
 
     tmp_fd, tmp_name = tempfile.mkstemp(
         dir=str(destination.parent), prefix=".comiccleaner-", suffix=".cbz"

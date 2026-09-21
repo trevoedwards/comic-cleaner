@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import xml.etree.ElementTree as ET
+from bisect import bisect_left
 
 log = logging.getLogger(__name__)
 
@@ -41,21 +42,22 @@ def update_comicinfo(
 
     pages_el = root.find("Pages")
     if pages_el is not None:
-        kept = []
+        removed_sorted = sorted(removed_indices)
         for page_el in list(pages_el):
             raw = page_el.get("Image")
             try:
                 image_index = int(raw) if raw is not None else None
             except ValueError:
                 image_index = None
-            if image_index is not None and image_index in removed_indices:
+            if image_index is None:
+                continue
+            if image_index in removed_indices:
                 pages_el.remove(page_el)
                 continue
-            kept.append(page_el)
-        # Renumber survivors so Image stays a dense 0..n-1 sequence.
-        for new_index, page_el in enumerate(kept):
-            if page_el.get("Image") is not None:
-                page_el.set("Image", str(new_index))
+            # Each survivor slides down by the number of removed pages before it.
+            # Counting positions among the listed elements instead would be wrong:
+            # many tools list only the special pages (cover, ads), not every one.
+            page_el.set("Image", str(image_index - bisect_left(removed_sorted, image_index)))
 
     count_el = root.find("PageCount")
     if count_el is not None:

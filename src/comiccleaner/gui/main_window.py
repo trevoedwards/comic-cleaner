@@ -44,7 +44,7 @@ from ..core.archive import ARCHIVE_SUFFIXES
 from ..core.cache import HashCache
 from ..core.grouping import build_groups, sort_groups, summarise
 from ..core.model import ArchiveInfo, Decision, DuplicateGroup, MatchKind, PageEntry
-from ..core.remover import build_plans
+from ..core.remover import build_plans, is_backup_name
 from ..core.scanner import find_archives
 from ..resources import app_icon
 from .about import AboutDialog
@@ -812,8 +812,12 @@ class MainWindow(QMainWindow):
         for folder in folders:
             if not folder.is_dir():
                 continue
-            for backup in folder.glob("*" + policy.suffix + "*"):
-                if backup.is_file() and backup not in seen:
+            for backup in folder.iterdir():
+                if (
+                    is_backup_name(backup.name, policy.suffix)
+                    and backup.is_file()
+                    and backup not in seen
+                ):
                     seen.add(backup)
                     found.append(backup)
 

@@ -11,14 +11,16 @@ from comiccleaner.core.cache import HashCache
 from comiccleaner.core.comicinfo import update_comicinfo
 from comiccleaner.core.grouping import GroupingOptions, build_groups
 from comiccleaner.core.hashing import digest_image, hamming
-from comiccleaner.core.model import Decision, MatchKind
+from comiccleaner.core.model import ArchiveKind, Decision, MatchKind
 from comiccleaner.core.remover import (
     BackupPolicy,
     RemovalPlan,
     apply_plan,
     apply_removals,
     build_plans,
+    is_backup_name,
 )
+from comiccleaner.core import remover
 from comiccleaner.core.scanner import find_archives, scan_archive, scan_archives
 
 from .conftest import make_flat_page, make_page, write_archive
@@ -376,3 +378,57 @@ def test_archive_reports_stored_size(library: Path) -> None:
         name = arc.page_names()[0]
         assert arc.stored_size(name) > 0
         assert arc.entry_size(name) > 0
+
+
+# -- regressions -----------------------------------------------------------
+
+
+def test_comicinfo_renumbers_a_partial_pages_block() -> None:
+    """Many tools list only the special pages, so positions are not indices."""
+    xml = (
+        b"<ComicInfo><PageCount>10</PageCount><Pages>"
+        b'<Page Image="0" Type="FrontCover"/>'
+        b'<Page Image="3" Type="Advertisement"/>'
+        b'<Page Type="Story"/>'
+        b'<Page Image="7" Type="BackCover"/>'
+        b"</Pages></ComicInfo>"
+    )
+
+    out = update_comicinfo(xml, {3, 4}, 8).decode()
+
+    assert 'Image="0"' in out
+    assert 'Image="5"' in out  # 7 slid down past the two removed pages
+    assert 'Type="Advertisement"' not in out
+    assert 'Type="Story"' in out  # no Image attribute, left alone
+    assert "<PageCount>8</PageCount>" in out
+
+
+def test_backup_names_are_recognised_strictly() -> None:
+    assert is_backup_name("Book 01.cbz.bak")
+    assert is_backup_name("Book 01.cbz.bak.2")
+    assert is_backup_name("Book 01.CBR.BAK")
+    # Real books that merely mention "bak" must never be offered for deletion.
+    assert not is_backup_name("Bakugan Vol 1.cbz")
+    assert not is_backup_name("Comic.bakery.cbz")
+    assert not is_backup_name("Book.bak.cbz")
+    assert not is_backup_name("notes.bak")
+    assert not is_backup_name("Book 01.cbz")
+
+
+def test_converting_never_overwrites_a_sibling_cbz(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """book.cbr is rebuilt as book.cbz, which may already be a different book."""
+    pages = [make_page(seed=i) for i in range(3)]
+    source = write_archive(tmp_path / "book.cbr", pages)  # a zip in disguise
+    existing = write_archive(tmp_path / "book.cbz", [make_page(seed=50)], comicinfo=False)
+    before = existing.read_bytes()
+    monkeypatch.setattr(remover, "detect_kind", lambda _p: ArchiveKind.RAR)
+    plan = RemovalPlan(archive=source, remove_names={"page002.jpg"}, original_pages=3)
+
+    result = apply_plan(plan)
+
+    assert result.error is not None and "overwrite" in result.error
+    assert existing.read_bytes() == before
+    assert source.exists()
+    assert not list(tmp_path.glob("*.bak"))

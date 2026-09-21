@@ -26,9 +26,8 @@ of a run, a credits page stapled onto every chapter. The giveaway is repetition:
 a page in *one* book is content, a page in *thirty* almost certainly is not.
 
 Comic Cleaner hashes every page, groups the images that keep reappearing, ranks
-them by how many books they affect, and strips out the ones you confirm. It does
-for a local library what [Komga's duplicate-pages feature](https://komga.org/docs/guides/duplicate-pages/)
-does for a server, with an import flow like ComicTagger's.
+them by how many books they affect, and strips out the ones you confirm — across
+a whole library at once, without unpacking anything by hand.
 
 ## Requirements
 
@@ -169,6 +168,4 @@ pipeline works as a library; `gui/` is the PySide6 layer on top.
 
 Developed by **Trevor Edwards** — [Playback Software](https://git.playbacksoftware.com/).
 
-Inspired by [Komga](https://komga.org/)'s duplicate-pages feature and
-[ComicTagger](https://github.com/comictagger/comictagger)'s import workflow.
 Licensed under the [MIT License](LICENSE).
