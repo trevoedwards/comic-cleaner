@@ -155,6 +155,25 @@ def test_full_workflow_removes_the_advert(window, library, monkeypatch):
         assert (library / f"{name}.bak").exists()
 
 
+def test_finished_removal_does_not_leave_stale_groups_to_reapply(window, library, monkeypatch):
+    window.import_paths([library])
+    window.settings.threshold = 8
+    scan_and_wait(window)
+    window._set_all_decisions(Decision.DELETE)
+
+    apply_and_wait(window, monkeypatch)
+
+    # The books were rewritten, so what was hashed no longer exists.
+    assert window.groups == []
+    assert not window.act_apply.isEnabled()
+    assert all(info.page_count == 0 for info in window.archives.values())
+
+    # A rescan sees the cleaned books, and nothing is left to remove.
+    scan_and_wait(window)
+    assert all(info.page_count == 4 for info in window.archives.values())
+    assert window.groups == []
+
+
 def test_dry_run_leaves_files_alone(window, library, monkeypatch):
     window.import_paths([library])
     window.settings.threshold = 8

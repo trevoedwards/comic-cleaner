@@ -6,6 +6,7 @@ import errno
 import os
 import stat
 import sys
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -590,3 +591,37 @@ def test_rebuilt_archive_keeps_the_original_permissions(tmp_path: Path) -> None:
     finally:
         for leftover in tmp_path.iterdir():
             os.chmod(leftover, stat.S_IWRITE | stat.S_IREAD)
+
+
+def _zip_with_duplicate_entry(path: Path) -> Path:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # zipfile warns about the repeat
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("page001.jpg", make_page(seed=1))
+            zf.writestr("page002.jpg", make_page(seed=2))
+            zf.writestr("page002.jpg", make_page(seed=3))  # same name again
+            zf.writestr("page003.jpg", make_page(seed=4))
+    return path
+
+
+def test_zip_with_a_repeated_entry_name_scans_through_the_cache(tmp_path: Path) -> None:
+    """The cache keys pages on (archive, name), so a repeat used to fail the whole book."""
+    book = _zip_with_duplicate_entry(tmp_path / "dup.cbz")
+    cache = HashCache(tmp_path / "cache.sqlite")
+    try:
+        info = scan_archives([book], cache=cache)[0]
+    finally:
+        cache.close()
+
+    assert info.error is None
+    assert info.page_count == 3
+
+
+def test_removal_works_on_a_zip_with_a_repeated_entry_name(tmp_path: Path) -> None:
+    book = _zip_with_duplicate_entry(tmp_path / "dup.cbz")
+    plan = RemovalPlan(archive=book, remove_names={"page003.jpg"}, original_pages=3)
+
+    result = apply_plan(plan)
+
+    assert result.ok, result.error
+    assert scan_archive(book).page_count == 2

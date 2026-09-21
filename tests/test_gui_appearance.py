@@ -324,3 +324,18 @@ def test_window_has_an_icon(window):
 
 def test_pump_until_helper_is_importable():
     assert callable(pump_until)
+
+
+def test_damaged_saved_settings_fall_back_instead_of_crashing(qapp, monkeypatch):
+    """Settings load while the window is built, so a bad value must not raise."""
+    stored = {"threshold": "abc", "min_pages": "", "min_archives": "9999"}
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None: stored.get(key, default)
+    )
+
+    loaded = AppSettings.load()
+
+    defaults = AppSettings()
+    assert loaded.threshold == defaults.threshold
+    assert loaded.min_pages == defaults.min_pages
+    assert loaded.min_archives == 100  # out of range is clamped, not trusted

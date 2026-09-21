@@ -139,7 +139,12 @@ class ComicArchive:
     def entry_names(self) -> list[str]:
         """Every non-directory entry, so we can preserve ComicInfo.xml etc."""
         if self._zip is not None:
-            return [i.filename for i in self._zip.infolist() if not i.is_dir()]
+            # A zip may hold several entries under one name, but zipfile can only
+            # ever read the last of them. Listing the name once keeps pages unique
+            # (the hash cache keys on it) and avoids reporting a book as a
+            # duplicate of itself.
+            names = (i.filename for i in self._zip.infolist() if not i.is_dir())
+            return list(dict.fromkeys(names))
         if self._extracted is not None:
             return list(self._extracted)
         raise ArchiveError("archive is not open")

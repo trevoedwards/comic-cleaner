@@ -801,7 +801,16 @@ class MainWindow(QMainWindow):
                 self.archives[result.output] = ArchiveInfo(
                     path=result.output, kind=_kind_of(result.output), size=0, mtime_ns=0
                 )
+            else:
+                # Rewritten in place: the pages hashed earlier no longer exist.
+                # Leaving them would keep the finished groups on screen with Apply
+                # still enabled, and pressing it again fails on every archive.
+                info = self.archives.get(result.archive)
+                if info is not None:
+                    info.pages = []
+                    info.page_count = 0
         self._refresh_archive_list()
+        self.rebuild_groups()
         self.status_label.setText("Removal finished. Re-scan to refresh the results.")
 
     def _show_dry_run_result(self, report: object) -> None:

@@ -80,9 +80,17 @@ class AppSettings:
         store = QSettings(ORG, APP)
         defaults = cls()
         return cls(
-            threshold=int(store.value("threshold", defaults.threshold)),
-            min_pages=int(store.value("min_pages", defaults.min_pages)),
-            min_archives=int(store.value("min_archives", defaults.min_archives)),
+            threshold=_as_int(
+                store.value("threshold", defaults.threshold),
+                defaults.threshold, 0, MAX_THRESHOLD,
+            ),
+            min_pages=_as_int(
+                store.value("min_pages", defaults.min_pages), defaults.min_pages, 2, 100
+            ),
+            min_archives=_as_int(
+                store.value("min_archives", defaults.min_archives),
+                defaults.min_archives, 1, 100,
+            ),
             include_flat=_as_bool(store.value("include_flat", defaults.include_flat)),
             skip_first_page=_as_bool(
                 store.value("skip_first_page", defaults.skip_first_page)
@@ -107,6 +115,20 @@ class AppSettings:
         for field_name, value in self.__dict__.items():
             store.setValue(field_name, value)
         store.sync()
+
+
+def _as_int(value: object, default: int, low: int, high: int) -> int:
+    """A stored number, clamped to what the settings dialog allows.
+
+    QSettings hands back whatever is on disk. A hand-edited or damaged value must
+    fall back to the default rather than raise, because this runs while the main
+    window is being built and a failure there means the app can never start.
+    """
+    try:
+        number = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
 
 
 def _as_bool(value: object) -> bool:
