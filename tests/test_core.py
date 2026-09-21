@@ -625,3 +625,51 @@ def test_removal_works_on_a_zip_with_a_repeated_entry_name(tmp_path: Path) -> No
 
     assert result.ok, result.error
     assert scan_archive(book).page_count == 2
+
+
+def test_removal_refuses_when_pages_were_swapped_since_the_scan(library: Path) -> None:
+    """Names alone are not identity: a re-pack can leave a story page under an ad's name."""
+    archives = scan_archives(find_archives([library]))
+    groups = _mark_all_for_deletion(build_groups(archives, GroupingOptions(threshold=8)))
+    plans = build_plans(groups, {a.path: a.page_count for a in archives})
+
+    # Another tool re-packs Book 01 so page002 is now a real story page.
+    book = library / "Book 01.cbz"
+    story = [make_page(seed=100 + i) for i in range(4)]
+    write_archive(book, [story[0], story[1], make_page(seed=9999), *story[2:]])
+    before = book.read_bytes()
+
+    report = apply_removals(plans)
+
+    by_name = {r.archive.name: r for r in report.results}
+    assert by_name["Book 01.cbz"].error is not None
+    assert "changed since scan" in by_name["Book 01.cbz"].error
+    assert book.read_bytes() == before
+    assert not (library / "Book 01.cbz.bak").exists()
+    # The untouched books were still cleaned.
+    assert by_name["Book 02.cbz"].ok and by_name["Book 03.cbz"].ok
+
+
+def test_output_dir_mirrors_folders_so_same_named_books_do_not_collide(tmp_path: Path) -> None:
+    """Two series that both have a "Vol 01.cbz" used to fight over one flat folder."""
+    root = tmp_path / "library"
+    ad = make_page(seed=9999)
+    for s_index, series in enumerate(("Batman", "Superman")):
+        for vol in (1, 2):
+            story = [make_page(seed=s_index * 1000 + vol * 10 + i) for i in range(4)]
+            write_archive(root / series / f"Vol {vol:02d}.cbz", [story[0], ad, *story[1:]])
+    archives = scan_archives(find_archives([root]))
+    groups = _mark_all_for_deletion(build_groups(archives, GroupingOptions(threshold=8)))
+    out = tmp_path / "cleaned"
+
+    report = apply_removals(
+        build_plans(groups, {a.path: a.page_count for a in archives}), output_dir=out
+    )
+
+    assert not report.failed, [r.error for r in report.failed]
+    produced = sorted(p.relative_to(out).as_posix() for p in out.rglob("*.cbz"))
+    assert produced == [
+        "Batman/Vol 01.cbz", "Batman/Vol 02.cbz",
+        "Superman/Vol 01.cbz", "Superman/Vol 02.cbz",
+    ]
+    assert all(scan_archive(out / name).page_count == 4 for name in produced)

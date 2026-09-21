@@ -25,6 +25,7 @@ from .archive import (
     write_cbz,
 )
 from .comicinfo import find_comicinfo, update_comicinfo
+from .hashing import content_digest
 from .model import ArchiveKind, DuplicateGroup
 
 log = logging.getLogger(__name__)
@@ -53,6 +54,10 @@ class RemovalPlan:
     archive: Path
     remove_names: set[str]
     original_pages: int
+    # sha256 of each marked page as it was scanned. When present, a page whose
+    # bytes no longer match is left alone: another tool may have renumbered or
+    # swapped pages since, and a name alone would then delete the wrong image.
+    expected_sha: dict[str, str] = field(default_factory=dict)
 
     @property
     def remaining_pages(self) -> int:
@@ -100,18 +105,19 @@ def build_plans(
     groups: Iterable[DuplicateGroup], archive_page_counts: dict[Path, int]
 ) -> list[RemovalPlan]:
     """Collapse group decisions into one plan per affected archive."""
-    per_archive: dict[Path, set[str]] = defaultdict(set)
+    per_archive: dict[Path, dict[str, str]] = defaultdict(dict)
     for group in groups:
         for page in group.pages_to_remove():
-            per_archive[page.archive].add(page.name)
+            per_archive[page.archive][page.name] = page.content_sha
 
     plans = [
         RemovalPlan(
             archive=archive,
-            remove_names=names,
+            remove_names=set(shas),
             original_pages=archive_page_counts.get(archive, 0),
+            expected_sha=shas,
         )
-        for archive, names in per_archive.items()
+        for archive, shas in per_archive.items()
     ]
     plans.sort(key=lambda p: str(p.archive).lower())
     return plans
@@ -243,6 +249,13 @@ def _collect_entries(
             )
         if not removing:
             return [], set(), 0, len(page_names)
+        for name in removing:
+            expected = plan.expected_sha.get(name)
+            if expected and content_digest(arc.read(name)) != expected:
+                raise RemovalError(
+                    f"archive changed since scan; {name} no longer matches the page "
+                    "that was marked, so nothing was removed"
+                )
         if len(removing) >= len(page_names):
             raise RemovalError(
                 "refusing to remove every page - this would empty the archive"
@@ -374,6 +387,14 @@ def apply_plan(
     return result
 
 
+def _common_parent(plans: list[RemovalPlan]) -> Path | None:
+    """The deepest folder containing every archive, or None if there isn't one."""
+    try:
+        return Path(os.path.commonpath([plan.archive.parent for plan in plans]))
+    except ValueError:  # nothing to compare, or archives on different drives
+        return None
+
+
 def apply_removals(
     plans: Iterable[RemovalPlan],
     *,
@@ -387,16 +408,23 @@ def apply_removals(
     """Apply every plan in turn. Disk-bound, so there is no thread pool here."""
     todo = list(plans)
     report = RemovalReport()
+    # Cleaned copies keep their folder layout under the output folder. Flattening
+    # them would make two series that both have a "Vol 01.cbz" collide, and the
+    # second would be refused.
+    mirror_root = _common_parent(todo) if output_dir is not None else None
     for done, plan in enumerate(todo, start=1):
         if should_cancel is not None and should_cancel():
             break
+        plan_output = output_dir
+        if output_dir is not None and mirror_root is not None:
+            plan_output = output_dir / plan.archive.parent.relative_to(mirror_root)
         # One archive blowing up must not discard the results of those already
         # rewritten - the user still needs to hear which files changed.
         try:
             result = apply_plan(
                 plan,
                 backup=backup,
-                output_dir=output_dir,
+                output_dir=plan_output,
                 dry_run=dry_run,
                 compress=compress,
             )

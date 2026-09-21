@@ -699,7 +699,7 @@ class MainWindow(QMainWindow):
         # file be renamed while a handle is alive.
         self.thumbs.release_archives()
 
-        self._set_busy(True, "Removing")
+        self._set_busy(True, "Removing", lock_views=True)
         worker = RemovalWorker(
             plans,
             backup=self.settings.backup_policy(),
@@ -939,7 +939,11 @@ class MainWindow(QMainWindow):
                 item.setForeground(QBrush(_decision_colour(group.decision)))
 
     # -- misc --------------------------------------------------------------
-    def _set_busy(self, busy: bool, verb: str = "") -> None:
+    def _set_busy(self, busy: bool, verb: str = "", *, lock_views: bool = False) -> None:
+        # While archives are being rewritten the review panels stay untouched:
+        # browsing a group makes the thumbnail cache open the very files the
+        # removal is about to swap, and on Windows an open file cannot be replaced.
+        self.centralWidget().setEnabled(not (busy and lock_views))
         self.progress.setVisible(busy)
         if busy:
             self.progress.setValue(0)

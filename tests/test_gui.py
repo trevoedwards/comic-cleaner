@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -279,6 +280,44 @@ def test_marking_everything_does_not_reset_the_selection(window, tmp_path):
     window._set_all_decisions(Decision.DELETE)
 
     assert window.group_list.currentItem().data(ROLE_GID) == chosen
+
+
+def test_review_panels_are_locked_while_archives_are_rewritten(window, tmp_path, monkeypatch):
+    """Browsing a group opens its archives for thumbnails, which blocks the swap on Windows."""
+    from PySide6.QtWidgets import QDialog, QMessageBox
+
+    from comiccleaner.core import remover
+
+    _three_ad_library(tmp_path)
+    window.import_paths([tmp_path])
+    scan_and_wait(window)
+    window._set_all_decisions(Decision.DELETE)
+
+    entered, gate = threading.Event(), threading.Event()
+    real_apply = remover.apply_plan
+
+    def slow_apply(plan, **kwargs):
+        entered.set()
+        gate.wait(20)
+        return real_apply(plan, **kwargs)
+
+    monkeypatch.setattr(remover, "apply_plan", slow_apply)
+    monkeypatch.setattr(
+        "comiccleaner.gui.main_window._ConfirmDialog.exec",
+        lambda self: QDialog.DialogCode.Accepted,
+    )
+    monkeypatch.setattr("comiccleaner.gui.main_window._ConfirmDialog.dry_run", lambda self: False)
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.StandardButton.Ok)
+
+    window.apply_removals()
+    try:
+        assert pump_until(entered.is_set, 10), "removal never started"
+        assert not window.centralWidget().isEnabled()
+    finally:
+        gate.set()
+
+    assert pump_until(lambda: window._removal_worker is None), "removal did not finish"
+    assert window.centralWidget().isEnabled()
 
 
 def test_ignoring_a_group_hides_it_permanently(window, library):
