@@ -98,6 +98,7 @@ class MainWindow(QMainWindow):
         self.groups: list[DuplicateGroup] = []
         self._scan_worker: ScanWorker | None = None
         self._removal_worker: RemovalWorker | None = None
+        self._removal_was_dry_run = False
         self._sort_key = "books"
         self._last_backups: list[Path] = []
 
@@ -698,6 +699,7 @@ class MainWindow(QMainWindow):
         worker.failed.connect(self._on_worker_failed)
         worker.finished.connect(self._on_removal_thread_finished)
         self._removal_worker = worker
+        self._removal_was_dry_run = dialog.dry_run()
         worker.start()
 
     @Slot(int, int, str)
@@ -711,6 +713,10 @@ class MainWindow(QMainWindow):
         succeeded = report.succeeded
         failed = report.failed
         converted = [r for r in succeeded if r.converted]
+
+        if self._removal_was_dry_run:
+            self._show_dry_run_result(report)
+            return
 
         lines = [
             f"Removed {report.total_removed} page(s) from {len(succeeded)} archive(s).",
@@ -783,6 +789,31 @@ class MainWindow(QMainWindow):
                 )
         self._refresh_archive_list()
         self.status_label.setText("Removal finished. Re-scan to refresh the results.")
+
+    def _show_dry_run_result(self, report: object) -> None:
+        """Report what a dry run would have done. Nothing on disk changed, so the
+        library, cache and thumbnails are left exactly as they were."""
+        lines = [
+            f"Dry run: {report.total_removed} page(s) would be removed from "
+            f"{len(report.succeeded)} archive(s), freeing {human_bytes(report.total_freed)}.",
+            "Nothing was changed.",
+        ]
+        converted = [r for r in report.succeeded if r.converted]
+        if converted:
+            lines.append(
+                f"{len(converted)} .cbr/.cb7 file(s) would be rebuilt as .cbz "
+                "(those formats cannot be written in place)."
+            )
+        if report.failed:
+            lines.append("")
+            lines.append(f"{len(report.failed)} archive(s) would fail:")
+            lines += [f"  {r.archive.name}: {r.error}" for r in report.failed[:8]]
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("Dry run finished")
+        box.setText(chr(10).join(lines))
+        box.exec()
+        self.status_label.setText("Dry run finished. Nothing was changed.")
 
     def _delete_backups(self, backups: list[Path]) -> tuple[int, int]:
         """Delete backup files, returning how many went and how much was freed."""

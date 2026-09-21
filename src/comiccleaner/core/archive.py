@@ -7,6 +7,7 @@ import re
 import shutil
 import tempfile
 import zipfile
+import zlib
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -146,7 +147,18 @@ class ComicArchive:
 
     def read(self, name: str) -> bytes:
         if self._zip is not None:
-            return self._zip.read(name)
+            try:
+                return self._zip.read(name)
+            except (
+                zipfile.BadZipFile,
+                zlib.error,
+                EOFError,
+                RuntimeError,
+                NotImplementedError,
+            ) as exc:
+                # Bad CRC, truncated data, encryption or an exotic compression
+                # method: one bad entry, not a reason to abort the whole scan/run.
+                raise ArchiveError(f"cannot read {name}: {exc}") from exc
         if self._extracted is not None:
             file = self._extracted.get(name)
             if file is None:

@@ -304,16 +304,24 @@ def apply_plan(
         write_cbz(tmp_path, entries, compress=compress)
         _verify_cbz(tmp_path, expected_pages)
 
+        # Converting cbr to cbz with no backup: the source must still go, but only
+        # once the replacement is in place - otherwise a failed rename loses both.
+        drop_source = False
         if replacing_in_place and plan.archive.exists():
             if policy.enabled:
                 backup_target = _backup_path(plan.archive, policy)
                 _move_aside(plan.archive, backup_target)
                 result.backup = backup_target
-            elif result.converted:
-                # Converting cbr to cbz with no backup: the source must still go.
-                plan.archive.unlink()
+            else:
+                drop_source = result.converted
 
         os.replace(tmp_path, destination)
+        if drop_source:
+            try:
+                plan.archive.unlink()
+            except OSError as exc:
+                # The cleaned .cbz exists; a leftover original is harmless.
+                log.warning("could not remove converted original %s: %s", plan.archive, exc)
     except (RemovalError, OSError, zipfile.BadZipFile) as exc:
         tmp_path.unlink(missing_ok=True)
         # Restore the original if it was already moved aside.
@@ -344,15 +352,20 @@ def apply_removals(
     for done, plan in enumerate(todo, start=1):
         if should_cancel is not None and should_cancel():
             break
-        report.results.append(
-            apply_plan(
+        # One archive blowing up must not discard the results of those already
+        # rewritten - the user still needs to hear which files changed.
+        try:
+            result = apply_plan(
                 plan,
                 backup=backup,
                 output_dir=output_dir,
                 dry_run=dry_run,
                 compress=compress,
             )
-        )
+        except Exception as exc:
+            log.exception("removal failed for %s", plan.archive)
+            result = RemovalResult(archive=plan.archive, error=f"unexpected error: {exc}")
+        report.results.append(result)
         if progress is not None:
             progress(done, len(todo), plan.archive.name)
     return report

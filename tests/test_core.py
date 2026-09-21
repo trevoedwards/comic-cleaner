@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+import os
 import zipfile
 from pathlib import Path
 
@@ -432,3 +434,98 @@ def test_converting_never_overwrites_a_sibling_cbz(
     assert existing.read_bytes() == before
     assert source.exists()
     assert not list(tmp_path.glob("*.bak"))
+
+
+def _rar_pretender(monkeypatch) -> None:
+    """Make the remover treat a zip named .cbr as a RAR, so it converts."""
+    monkeypatch.setattr(remover, "detect_kind", lambda _p: ArchiveKind.RAR)
+
+
+def test_conversion_without_backup_replaces_the_original(tmp_path: Path, monkeypatch) -> None:
+    source = write_archive(tmp_path / "book.cbr", [make_page(seed=i) for i in range(3)])
+    _rar_pretender(monkeypatch)
+    plan = RemovalPlan(archive=source, remove_names={"page002.jpg"}, original_pages=3)
+
+    result = apply_plan(plan, backup=BackupPolicy(enabled=False))
+
+    assert result.ok and result.converted
+    assert not source.exists()
+    assert scan_archive(tmp_path / "book.cbz").page_count == 2
+
+
+def test_failed_conversion_without_backup_keeps_the_original(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The source used to be deleted *before* the rebuilt file was moved in."""
+    source = write_archive(tmp_path / "book.cbr", [make_page(seed=i) for i in range(3)])
+    _rar_pretender(monkeypatch)
+    real_replace = os.replace
+
+    def deny_cbz(src, dst):
+        if str(dst).endswith(".cbz"):
+            raise PermissionError(errno.EACCES, "denied")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(remover.os, "replace", deny_cbz)
+    plan = RemovalPlan(archive=source, remove_names={"page002.jpg"}, original_pages=3)
+
+    result = apply_plan(plan, backup=BackupPolicy(enabled=False))
+
+    assert result.error is not None
+    assert source.exists()
+    assert scan_archive(source).page_count == 3
+
+
+def _corrupt_page(path: Path, page: bytes) -> None:
+    """Flip a byte inside a stored page so its CRC no longer matches."""
+    raw = bytearray(path.read_bytes())
+    raw[raw.find(page) + 20] ^= 0xFF
+    path.write_bytes(bytes(raw))
+
+
+def test_corrupt_entry_is_a_page_error_not_an_archive_error(tmp_path: Path) -> None:
+    pages = [make_page(seed=i) for i in range(4)]
+    book = write_archive(tmp_path / "book.cbz", pages)
+    _corrupt_page(book, pages[1])
+
+    info = scan_archive(book)
+
+    assert info.error is None
+    assert info.page_count == 4
+    assert [p.error is not None for p in info.pages] == [False, True, False, False]
+
+
+def test_removal_from_an_archive_with_a_corrupt_entry_fails_cleanly(tmp_path: Path) -> None:
+    pages = [make_page(seed=i) for i in range(4)]
+    book = write_archive(tmp_path / "book.cbz", pages)
+    _corrupt_page(book, pages[1])
+    before = book.read_bytes()
+    plan = RemovalPlan(archive=book, remove_names={"page003.jpg"}, original_pages=4)
+
+    result = apply_plan(plan)
+
+    assert result.error is not None and "page002.jpg" in result.error
+    assert book.read_bytes() == before
+    assert not list(tmp_path.glob("*.bak"))
+
+
+def test_one_unexpected_failure_does_not_lose_the_report(library: Path, monkeypatch) -> None:
+    archives = scan_archives(find_archives([library]))
+    groups = _mark_all_for_deletion(build_groups(archives, GroupingOptions(threshold=8)))
+    plans = build_plans(groups, {a.path: a.page_count for a in archives})
+    real_apply = remover.apply_plan
+    seen: list[Path] = []
+
+    def flaky(plan, **kwargs):
+        seen.append(plan.archive)
+        if len(seen) == 2:
+            raise ValueError("boom")
+        return real_apply(plan, **kwargs)
+
+    monkeypatch.setattr(remover, "apply_plan", flaky)
+
+    report = apply_removals(plans)
+
+    assert len(report.results) == 3
+    assert len(report.succeeded) == 2
+    assert len(report.failed) == 1 and "boom" in report.failed[0].error

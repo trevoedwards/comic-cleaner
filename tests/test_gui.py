@@ -165,6 +165,33 @@ def test_dry_run_leaves_files_alone(window, library, monkeypatch):
     assert not list(library.glob("*.bak"))
 
 
+def test_dry_run_reports_honestly_and_keeps_the_library_intact(
+    window, library, monkeypatch
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    window.import_paths([library])
+    window.settings.threshold = 8
+    scan_and_wait(window)
+    window._set_all_decisions(Decision.DELETE)
+    shown: list[str] = []
+    real_set_text = QMessageBox.setText
+    monkeypatch.setattr(
+        QMessageBox, "setText", lambda self, text: (shown.append(text), real_set_text(self, text))
+    )
+    book = library / "Book 01.cbz"
+    stat = book.stat()
+    assert window.cache.get(book, stat.st_size, stat.st_mtime_ns) is not None
+
+    apply_and_wait(window, monkeypatch, dry_run=True)
+
+    assert shown and shown[-1].startswith("Dry run")
+    assert "Nothing was changed" in shown[-1]
+    # Nothing on disk moved, so the cached hashes and scanned pages are still good.
+    assert window.cache.get(book, stat.st_size, stat.st_mtime_ns) is not None
+    assert all(info.pages for info in window.archives.values())
+
+
 def test_ignoring_a_group_hides_it_permanently(window, library):
     window.import_paths([library])
     window.settings.threshold = 8
