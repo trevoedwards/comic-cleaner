@@ -31,7 +31,8 @@ a whole library at once, without unpacking anything by hand.
 
 ## Requirements
 
-- **Python 3.10+** (developed on 3.12), or just grab a [prebuilt binary](#building-a-binary).
+- **Python 3.10+** (developed on 3.12), or just grab a prebuilt binary from the
+  [Releases page](https://github.com/trevoedwards/comic-cleaner/releases/latest).
 - **Optional:** [7-Zip](https://www.7-zip.org/), `unrar` or WinRAR — only for
   `.cbr` / `.cb7`. Found automatically; **Settings → Archive tools** shows what
   was detected. `.cbz` needs nothing. To use a specific 7-Zip, set
@@ -137,6 +138,19 @@ Windows, macOS and Linux, and uses the project `.venv` if there is one.
 > [!NOTE]
 > PyInstaller cannot cross-compile — each binary must be built on the OS it
 > targets. CI builds all three on every push and uploads them as artifacts.
+
+### Publishing a release
+
+Set the same version in `pyproject.toml` and `src/comiccleaner/__init__.py`,
+commit, then tag and push:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+CI builds every platform and, if the tag matches both version numbers, publishes
+a GitHub release with `ComicCleaner-<version>-windows-x64.exe`,
+`…-macos-arm64.zip`, `…-linux-x64.tar.gz` and a `SHA256SUMS.txt`.
 
 ## When something goes wrong
 
