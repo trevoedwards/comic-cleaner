@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import errno
 import os
+import stat
 import sys
 import zipfile
 from pathlib import Path
 
-from comiccleaner.core import grouping
-from comiccleaner.core.archive import ComicArchive, is_page_name, natural_key
+from comiccleaner.core import extern, grouping, remover
+from comiccleaner.core.archive import TEMP_PREFIX, ComicArchive, is_page_name, natural_key
 from comiccleaner.core.cache import HashCache
 from comiccleaner.core.comicinfo import update_comicinfo
 from comiccleaner.core.grouping import GroupingOptions, build_groups
@@ -23,7 +24,6 @@ from comiccleaner.core.remover import (
     build_plans,
     is_backup_name,
 )
-from comiccleaner.core import extern, remover
 from comiccleaner.core.scanner import find_archives, scan_archive, scan_archives
 
 from .conftest import make_flat_page, make_page, write_archive
@@ -564,3 +564,29 @@ def test_output_dir_equal_to_the_source_folder_is_refused(tmp_path: Path) -> Non
 
     assert result.error is not None and "overwrite" in result.error
     assert book.read_bytes() == before
+
+
+def test_find_archives_skips_appledouble_stubs_and_leftover_temp_files(tmp_path: Path) -> None:
+    """macOS drops a "._" stub beside every file on exFAT/SMB volumes."""
+    real = write_archive(tmp_path / "Book.cbz", [make_page(seed=1), make_page(seed=2)])
+    (tmp_path / "._Book.cbz").write_bytes(bytes([0, 5, 22, 7]) + b" appledouble")
+    (tmp_path / f"{TEMP_PREFIX}abc123.cbz").write_bytes(b"partial write")
+
+    assert find_archives([tmp_path]) == [real.resolve()]
+    assert find_archives([tmp_path / "._Book.cbz"]) == []
+
+
+def test_rebuilt_archive_keeps_the_original_permissions(tmp_path: Path) -> None:
+    """mkstemp makes 0600 files; a media server running as someone else needs more."""
+    book = write_archive(tmp_path / "book.cbz", [make_page(seed=i) for i in range(3)])
+    os.chmod(book, 0o444)
+    expected = stat.S_IMODE(book.stat().st_mode)
+    plan = RemovalPlan(archive=book, remove_names={"page002.jpg"}, original_pages=3)
+
+    try:
+        result = apply_plan(plan)
+        assert result.ok, result.error
+        assert stat.S_IMODE(book.stat().st_mode) == expected
+    finally:
+        for leftover in tmp_path.iterdir():
+            os.chmod(leftover, stat.S_IWRITE | stat.S_IREAD)

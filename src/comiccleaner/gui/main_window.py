@@ -500,6 +500,13 @@ class MainWindow(QMainWindow):
         )
 
     def _refresh_group_list(self) -> None:
+        # Stay on the group being reviewed. If it is gone (just ignored, say), land
+        # on whatever slid into its place rather than snapping back to the top of a
+        # list the user may have been working down for a while.
+        previous = self.group_list.currentItem()
+        previous_gid = previous.data(ROLE_GID) if previous is not None else None
+        previous_row = self.group_list.currentRow()
+
         self.group_list.blockSignals(True)
         self.group_list.clear()
         for group in self.groups:
@@ -511,10 +518,13 @@ class MainWindow(QMainWindow):
             item.setForeground(QBrush(_decision_colour(group.decision)))
             self.group_list.addItem(item)
         self.group_list.blockSignals(False)
-        if self.groups:
-            self.group_list.setCurrentRow(0)
-        else:
+        if not self.groups:
             self._clear_detail()
+            return
+        row = next((i for i, g in enumerate(self.groups) if g.gid == previous_gid), None)
+        if row is None:
+            row = min(max(previous_row, 0), len(self.groups) - 1)
+        self.group_list.setCurrentRow(row)
 
     def _group_text(self, group: GroupOrAny) -> str:
         marker = {

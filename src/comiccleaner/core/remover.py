@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import logging
 import os
 import shutil
+import stat
 import tempfile
 import zipfile
 from collections import defaultdict
@@ -15,6 +17,7 @@ from pathlib import Path
 
 from .archive import (
     ARCHIVE_SUFFIXES,
+    TEMP_PREFIX,
     ArchiveError,
     ComicArchive,
     detect_kind,
@@ -168,6 +171,38 @@ def _move_aside(src: Path, dst: Path) -> None:
         raise
 
 
+def _mode_of(path: Path) -> int | None:
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        return None
+
+
+def _apply_mode(path: Path, mode: int | None) -> None:
+    """Give the rebuilt file the original's permission bits.
+
+    mkstemp creates files readable by the owner only (0600), so without this a
+    cleaned book on Linux or macOS could no longer be read by a media server
+    running as another user, and a read-only original would come back writable.
+    """
+    if mode is None:
+        return
+    try:
+        os.chmod(path, mode)
+    except OSError as exc:
+        log.debug("could not restore permissions on %s: %s", path, exc)
+
+
+def _discard(path: Path) -> None:
+    """Delete a temp file, even if it inherited a read-only mode."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+            path.unlink(missing_ok=True)
+
+
 def _explain(exc: OSError, path: Path) -> str:
     """Turn the common Windows sharing violation into something actionable."""
     if getattr(exc, "winerror", 0) == 32 or exc.errno == errno.EACCES:
@@ -296,9 +331,9 @@ def apply_plan(
     if dry_run:
         return result
 
-
+    original_mode = _mode_of(plan.archive)
     tmp_fd, tmp_name = tempfile.mkstemp(
-        dir=str(destination.parent), prefix=".comiccleaner-", suffix=".cbz"
+        dir=str(destination.parent), prefix=TEMP_PREFIX, suffix=".cbz"
     )
     os.close(tmp_fd)
     tmp_path = Path(tmp_name)
@@ -317,6 +352,7 @@ def apply_plan(
             else:
                 drop_source = result.converted
 
+        _apply_mode(tmp_path, original_mode)
         os.replace(tmp_path, destination)
         if drop_source:
             try:
@@ -325,7 +361,7 @@ def apply_plan(
                 # The cleaned .cbz exists; a leftover original is harmless.
                 log.warning("could not remove converted original %s: %s", plan.archive, exc)
     except (RemovalError, OSError, zipfile.BadZipFile) as exc:
-        tmp_path.unlink(missing_ok=True)
+        _discard(tmp_path)
         # Restore the original if it was already moved aside.
         if result.backup is not None and not plan.archive.exists():
             _move_aside(result.backup, plan.archive)

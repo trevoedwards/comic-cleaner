@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .archive import ARCHIVE_SUFFIXES, ArchiveError, ComicArchive, detect_kind
+from .archive import ARCHIVE_SUFFIXES, TEMP_PREFIX, ArchiveError, ComicArchive, detect_kind
 from .cache import HashCache
 from .hashing import DecodeError, digest_image
 from .model import ArchiveInfo, ArchiveKind, PageEntry
@@ -16,6 +16,21 @@ from .model import ArchiveInfo, ArchiveKind, PageEntry
 log = logging.getLogger(__name__)
 
 ProgressFn = Callable[[int, int, str], None]
+
+
+# Files that carry an archive extension without being a comic: macOS writes a "._"
+# AppleDouble stub beside every file on exFAT/SMB volumes, and an interrupted
+# removal can strand its ".comiccleaner-" temp file. Importing either one shows up
+# as an unreadable book, or worse, as a second copy of a real book's pages.
+_NOT_ARCHIVE_PREFIXES = ("._", TEMP_PREFIX)
+
+
+def _is_archive_file(path: Path) -> bool:
+    return (
+        path.suffix.lower() in ARCHIVE_SUFFIXES
+        and not path.name.startswith(_NOT_ARCHIVE_PREFIXES)
+        and path.is_file()
+    )
 
 
 def find_archives(paths: Iterable[Path], *, recursive: bool = True) -> list[Path]:
@@ -26,9 +41,9 @@ def find_archives(paths: Iterable[Path], *, recursive: bool = True) -> list[Path
         if path.is_dir():
             walker = path.rglob("*") if recursive else path.glob("*")
             for child in walker:
-                if child.is_file() and child.suffix.lower() in ARCHIVE_SUFFIXES:
+                if _is_archive_file(child):
                     found.add(child.resolve())
-        elif path.is_file() and path.suffix.lower() in ARCHIVE_SUFFIXES:
+        elif _is_archive_file(path):
             found.add(path.resolve())
     return sorted(found)
 

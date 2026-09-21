@@ -18,6 +18,9 @@ log = logging.getLogger(__name__)
 
 ARCHIVE_SUFFIXES = {".cbz", ".zip", ".cbr", ".rar", ".cb7", ".7z"}
 
+# Prefix of the temp file a removal writes before swapping it in for the original.
+TEMP_PREFIX = ".comiccleaner-"
+
 # Windows path separator, spelled via chr() so it survives any escaping layer.
 SEP_ALT = chr(92)
 

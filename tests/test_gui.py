@@ -18,7 +18,9 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from comiccleaner.core.archive import is_page_name  # noqa: E402
 from comiccleaner.core.model import Decision  # noqa: E402
-from comiccleaner.gui.main_window import MainWindow, human_bytes  # noqa: E402
+from comiccleaner.gui.main_window import ROLE_GID, MainWindow, human_bytes  # noqa: E402
+
+from .conftest import make_page, write_archive  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -224,6 +226,40 @@ def test_scan_cannot_start_while_archives_are_being_rewritten(window, library):
         assert window._scan_worker is None
     finally:
         window._removal_worker = None
+
+
+def _three_ad_library(root: Path) -> None:
+    ads = [make_page(seed=9000 + i) for i in range(3)]
+    for number in range(3):
+        story = [make_page(seed=number * 100 + i) for i in range(3)]
+        write_archive(root / f"Book {number}.cbz", [story[0], *ads, *story[1:]])
+
+
+def test_ignoring_a_group_keeps_your_place_in_the_list(window, tmp_path):
+    _three_ad_library(tmp_path)
+    window.import_paths([tmp_path])
+    scan_and_wait(window)
+    assert window.group_list.count() == 3
+    gids = [window.group_list.item(i).data(ROLE_GID) for i in range(3)]
+
+    window.group_list.setCurrentRow(1)
+    window._ignore_current()
+
+    # The group that slid up into row 1 is now under review, not the top one.
+    assert window.group_list.currentRow() == 1
+    assert window.group_list.currentItem().data(ROLE_GID) == gids[2]
+
+
+def test_marking_everything_does_not_reset_the_selection(window, tmp_path):
+    _three_ad_library(tmp_path)
+    window.import_paths([tmp_path])
+    scan_and_wait(window)
+    window.group_list.setCurrentRow(2)
+    chosen = window.group_list.currentItem().data(ROLE_GID)
+
+    window._set_all_decisions(Decision.DELETE)
+
+    assert window.group_list.currentItem().data(ROLE_GID) == chosen
 
 
 def test_ignoring_a_group_hides_it_permanently(window, library):
