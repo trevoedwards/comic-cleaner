@@ -8,7 +8,6 @@ import shutil
 import tempfile
 import zipfile
 import zlib
-from collections.abc import Iterator
 from pathlib import Path
 
 from .extern import ExtractionError, extract_all
@@ -188,10 +187,6 @@ class ComicArchive:
         if self._zip is not None:
             return self._zip.getinfo(name).compress_size
         return self.entry_size(name)
-
-    def iter_pages(self) -> Iterator[tuple[str, bytes]]:
-        for name in self.page_names():
-            yield name, self.read(name)
 
 
 def write_cbz(dest: Path, entries: list[tuple[str, bytes]], *, compress: bool = False) -> None:

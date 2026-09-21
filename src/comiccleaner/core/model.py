@@ -114,11 +114,3 @@ class DuplicateGroup:
         if self.decision is not Decision.DELETE:
             return []
         return [p for p in self.pages if p.key not in self.kept]
-
-
-@dataclass(slots=True)
-class ScanProgress:
-    archives_done: int = 0
-    archives_total: int = 0
-    pages_done: int = 0
-    current: str = ""

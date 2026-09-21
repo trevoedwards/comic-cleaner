@@ -43,7 +43,7 @@ from .. import APP_NAME, GITHUB_URL
 from ..core.archive import ARCHIVE_SUFFIXES
 from ..core.cache import HashCache
 from ..core.grouping import build_groups, sort_groups, summarise
-from ..core.model import ArchiveInfo, Decision, DuplicateGroup, MatchKind, PageEntry
+from ..core.model import ArchiveInfo, Decision, DuplicateGroup, MatchKind
 from ..core.remover import build_plans, is_backup_name
 from ..core.scanner import find_archives
 from ..resources import app_icon
@@ -526,7 +526,7 @@ class MainWindow(QMainWindow):
             row = min(max(previous_row, 0), len(self.groups) - 1)
         self.group_list.setCurrentRow(row)
 
-    def _group_text(self, group: GroupOrAny) -> str:
+    def _group_text(self, group: DuplicateGroup) -> str:
         marker = {
             Decision.DELETE: "[remove] ",
             Decision.KEEP: "[keep] ",
@@ -1059,8 +1059,3 @@ def _kind_of(path: Path):
     from ..core.archive import detect_kind
 
     return detect_kind(path)
-
-
-# Small alias so the type hint above stays readable without a circular import.
-GroupOrAny = DuplicateGroup
-PageRef = PageEntry

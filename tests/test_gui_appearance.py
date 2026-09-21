@@ -315,7 +315,7 @@ def test_icon_asset_is_present_and_square():
 
 def test_windows_ico_exists_for_the_build():
     ico = Path(__file__).resolve().parents[1] / "assets" / "comiccleaner.ico"
-    assert ico.is_file(), "assets/comiccleaner.ico is needed by build.ps1"
+    assert ico.is_file(), "assets/comiccleaner.ico is needed by build.py"
 
 
 def test_window_has_an_icon(window):

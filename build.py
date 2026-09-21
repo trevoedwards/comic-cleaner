@@ -4,7 +4,7 @@ PyInstaller cannot cross-compile, so this must run on the OS you are targeting:
 Windows produces ComicCleaner.exe, macOS a ComicCleaner.app bundle, and Linux a
 single ComicCleaner executable.
 
-    python build.py [--onedir] [--console] [--clean] [--smoke-test]
+    python build.py [--onedir] [--console] [--clean] [--smoke-test | --smoke-only]
 """
 
 from __future__ import annotations

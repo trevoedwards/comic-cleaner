@@ -1,13 +1,6 @@
 # Normalise to LF in the repository and let Git decide the working-tree ending.
 * text=auto
 
-# Shell scripts must keep LF everywhere: a CRLF shebang makes Linux and macOS
-# fail with "bad interpreter: /usr/bin/env bash^M".
-*.sh text eol=lf
-
-# PowerShell is happiest with CRLF on Windows.
-*.ps1 text eol=crlf
-
 # Never touch binary assets.
 *.png binary
 *.ico binary
