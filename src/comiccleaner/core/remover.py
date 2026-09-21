@@ -320,11 +320,7 @@ def apply_plan(
         ArchiveKind.RAR,
         ArchiveKind.SEVENZIP,
     )
-    if output_dir is not None:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        destination = output_dir / plan.archive.name
-    else:
-        destination = plan.archive
+    destination = output_dir / plan.archive.name if output_dir is not None else plan.archive
     if result.converted:
         destination = destination.with_suffix(".cbz")
     result.output = destination
@@ -345,9 +341,19 @@ def apply_plan(
         return result
 
     original_mode = _mode_of(plan.archive)
-    tmp_fd, tmp_name = tempfile.mkstemp(
-        dir=str(destination.parent), prefix=TEMP_PREFIX, suffix=".cbz"
-    )
+    # Folders are only created once we are really writing, so a dry run leaves no
+    # trace, and an unusable destination is reported plainly rather than escaping.
+    try:
+        if output_dir is not None:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            dir=str(destination.parent), prefix=TEMP_PREFIX, suffix=".cbz"
+        )
+    except OSError as exc:
+        result.error = f"cannot write to {destination.parent}: {_explain(exc, destination)}"
+        result.removed = 0
+        result.bytes_freed = 0
+        return result
     os.close(tmp_fd)
     tmp_path = Path(tmp_name)
     try:

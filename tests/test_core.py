@@ -673,3 +673,27 @@ def test_output_dir_mirrors_folders_so_same_named_books_do_not_collide(tmp_path:
         "Superman/Vol 01.cbz", "Superman/Vol 02.cbz",
     ]
     assert all(scan_archive(out / name).page_count == 4 for name in produced)
+
+
+def test_dry_run_creates_no_output_folders(tmp_path: Path) -> None:
+    book = write_archive(tmp_path / "src" / "book.cbz", [make_page(seed=i) for i in range(3)])
+    plan = RemovalPlan(archive=book, remove_names={"page002.jpg"}, original_pages=3)
+    out = tmp_path / "cleaned" / "deep"
+
+    result = apply_removals([plan], output_dir=out, dry_run=True).results[0]
+
+    assert result.ok
+    assert not (tmp_path / "cleaned").exists()
+
+
+def test_unusable_output_folder_is_reported_plainly(tmp_path: Path) -> None:
+    book = write_archive(tmp_path / "book.cbz", [make_page(seed=i) for i in range(3)])
+    blocker = tmp_path / "not_a_folder"
+    blocker.write_text("in the way")
+    plan = RemovalPlan(archive=book, remove_names={"page002.jpg"}, original_pages=3)
+
+    result = apply_removals([plan], output_dir=blocker / "sub").results[0]
+
+    assert result.error is not None and result.error.startswith("cannot write to")
+    assert "unexpected" not in result.error
+    assert scan_archive(book).page_count == 3
