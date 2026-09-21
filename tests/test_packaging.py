@@ -78,3 +78,21 @@ def test_cache_lands_in_a_named_app_folder() -> None:
     assert path.name == "hashes.sqlite"
     assert path.parent.name == APP
     assert path.parent.parent.name == ORG
+
+
+def test_the_app_icon_ships_in_a_regular_install() -> None:
+    """Editable installs read the icon straight from src/, which hides a missing
+    package-data entry; a normal `pip install .` would silently drop it."""
+    import pytest
+
+    tomllib = pytest.importorskip("tomllib")  # stdlib from 3.11
+    from comiccleaner.resources import ICON_NAME
+
+    root = Path(__file__).resolve().parents[1]
+    config = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    patterns = config["tool"]["setuptools"]["package-data"]["comiccleaner"]
+    package_dir = root / "src" / "comiccleaner"
+
+    shipped = {p.name for pattern in patterns for p in package_dir.glob(pattern)}
+
+    assert ICON_NAME in shipped

@@ -55,6 +55,9 @@ comiccleaner = "comiccleaner.__main__:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+comiccleaner = ["assets/*.png"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

@@ -43,9 +43,11 @@ _UNRAR_CANDIDATES = [
 
 def _first_existing(names: list[str], candidates: list[str]) -> str | None:
     """Prefer something on PATH, then fall back to well-known install locations."""
-    env_override = os.environ.get("COMICDEDUPE_7Z")
-    if env_override and Path(env_override).exists():
-        return env_override
+    # COMICDEDUPE_7Z is the name from before the project was renamed.
+    for variable in ("COMICCLEANER_7Z", "COMICDEDUPE_7Z"):
+        env_override = os.environ.get(variable)
+        if env_override and Path(env_override).exists():
+            return env_override
     for name in names:
         found = shutil.which(name)
         if found:

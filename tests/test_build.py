@@ -169,3 +169,28 @@ def test_archive_tool_candidates_cover_unix():
 
     assert "/usr/bin/" in seven and "/usr/bin/" in unrar
     assert "/opt/homebrew/" in seven  # Apple Silicon Homebrew prefix
+
+
+def test_7zip_override_accepts_the_new_and_the_pre_rename_variable(tmp_path, monkeypatch):
+    from comiccleaner.core import extern
+
+    tool = tmp_path / "7z-custom"
+    tool.write_text("")
+    for variable in ("COMICCLEANER_7Z", "COMICDEDUPE_7Z"):
+        monkeypatch.delenv("COMICCLEANER_7Z", raising=False)
+        monkeypatch.delenv("COMICDEDUPE_7Z", raising=False)
+        monkeypatch.setenv(variable, str(tool))
+
+        assert extern._first_existing(["definitely-not-installed"], []) == str(tool)
+
+
+def test_new_7zip_variable_wins_over_the_old_one(tmp_path, monkeypatch):
+    from comiccleaner.core import extern
+
+    new, old = tmp_path / "new-7z", tmp_path / "old-7z"
+    new.write_text("")
+    old.write_text("")
+    monkeypatch.setenv("COMICCLEANER_7Z", str(new))
+    monkeypatch.setenv("COMICDEDUPE_7Z", str(old))
+
+    assert extern._first_existing(["definitely-not-installed"], []) == str(new)
