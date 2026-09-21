@@ -281,10 +281,13 @@ def apply_plan(
         destination = destination.with_suffix(".cbz")
     result.output = destination
 
-    # Checked before the dry-run exit so a dry run reports the same refusal a real
-    # run would hit. Converting book.cbr lands on book.cbz, which may already be a
-    # different book sitting next to it.
-    if destination != plan.archive and destination.exists():
+    # The one destination we may write over is the archive itself, and only when
+    # replacing in place (that path takes a backup). Anything else that exists is
+    # a different file: a cleaned copy from an earlier run, the output folder being
+    # the source folder, or book.cbz sitting next to the book.cbr being converted.
+    # Checked before the dry-run exit so a dry run reports the same refusal.
+    replacing_in_place = output_dir is None
+    if destination.exists() and not (replacing_in_place and destination == plan.archive):
         result.error = f"refusing to overwrite existing file: {destination.name}"
         result.removed = 0
         result.bytes_freed = 0
@@ -293,7 +296,6 @@ def apply_plan(
     if dry_run:
         return result
 
-    replacing_in_place = output_dir is None
 
     tmp_fd, tmp_name = tempfile.mkstemp(
         dir=str(destination.parent), prefix=".comiccleaner-", suffix=".cbz"

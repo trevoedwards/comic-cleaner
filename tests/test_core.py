@@ -552,3 +552,15 @@ def test_external_tools_never_wait_on_stdin() -> None:
             os.close(fd)
 
     assert result.returncode == 0
+
+
+def test_output_dir_equal_to_the_source_folder_is_refused(tmp_path: Path) -> None:
+    """Writing "cleaned copies" over the originals would skip the backup step."""
+    book = write_archive(tmp_path / "book.cbz", [make_page(seed=i) for i in range(3)])
+    before = book.read_bytes()
+    plan = RemovalPlan(archive=book, remove_names={"page002.jpg"}, original_pages=3)
+
+    result = apply_plan(plan, output_dir=tmp_path)
+
+    assert result.error is not None and "overwrite" in result.error
+    assert book.read_bytes() == before
