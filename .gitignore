@@ -8,6 +8,10 @@ dist/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
@@ -15,3 +19,9 @@ dist/
 # Crash reports from local runs.
 crashlog/
 comiccleaner-selftest.txt
+
+# Editor and OS clutter.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

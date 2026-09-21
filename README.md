@@ -34,7 +34,8 @@ a whole library at once, without unpacking anything by hand.
 - **Python 3.10+** (developed on 3.12), or just grab a [prebuilt binary](#building-a-binary).
 - **Optional:** [7-Zip](https://www.7-zip.org/), `unrar` or WinRAR — only for
   `.cbr` / `.cb7`. Found automatically; **Settings → Archive tools** shows what
-  was detected. `.cbz` needs nothing.
+  was detected. `.cbz` needs nothing. To use a specific 7-Zip, set
+  `COMICCLEANER_7Z` to its path.
 
 Everything else is three pip packages (PySide6, Pillow, numpy) in a
 project-local `.venv`. Nothing lands on your system Python.
@@ -90,7 +91,7 @@ matches brute force. 50,000 pages at threshold 6: ~1.3 s instead of ~102 s.
 | **Never match first / last page** | on / off | Protects covers, which legitimately repeat across a series. |
 | **Include blank pages** | off | Blank pages look alike to *any* perceptual hash. |
 | **Delete backups after a run** | off | Sweeps `.bak` files once every archive in the run has succeeded. |
-| **Write cleaned copies to** | *(in place)* | Point at a folder to leave originals untouched. |
+| **Write cleaned copies to** | *(in place)* | Point at a folder to leave originals untouched. Books keep their folder layout underneath it, and an existing file is never overwritten. |
 
 ## Safety
 
@@ -100,9 +101,12 @@ Removal is the only destructive operation, and it is deliberately paranoid:
   correct page count — *before* the original is touched.
 - The original is then moved aside atomically and the new file swapped in. On any
   failure the original is put back.
-- It refuses to empty an archive, and refuses to act on a stale plan if the file
-  changed since the scan.
+- It refuses to empty an archive. Every page marked for removal is re-checked
+  against its hash from the scan, so a book that was re-packed or reordered since
+  is left alone rather than losing the wrong page.
 - A file locked by another program is skipped with an explanation, not mangled.
+- `ComicInfo.xml` is kept in step: `PageCount` is updated, and each `Page` entry's
+  `Image` index is shifted so it still points at the same image.
 
 Backups are kept by default. Clear them from the removal-finished dialog, from
 **Clean Up Backups…** on the toolbar, automatically via Settings, or keep them
@@ -120,8 +124,9 @@ Back up anything irreplaceable before a large run, and try the dry run first.
 python build.py --clean --smoke-test
 ```
 
-`build.ps1` and `build.sh` are thin wrappers around the same script. Options:
-`--onedir`, `--console`, `--clean`, `--smoke-test`.
+Options: `--onedir`, `--console`, `--clean`, `--smoke-test`, and `--smoke-only`
+(re-test whatever is already in `dist/` without rebuilding). It runs the same on
+Windows, macOS and Linux, and uses the project `.venv` if there is one.
 
 | Platform | Output | Icon |
 |---|---|---|
@@ -166,6 +171,6 @@ pipeline works as a library; `gui/` is the PySide6 layer on top.
 
 ## Credits
 
-Developed by **Trevor Edwards** — [Playback Software](https://git.playbacksoftware.com/).
+Developed by **Trevor Edwards** — [Playback Software](https://playbacksoftware.com/).
 
 Licensed under the [MIT License](LICENSE).
