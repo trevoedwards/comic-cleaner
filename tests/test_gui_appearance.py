@@ -72,6 +72,37 @@ def test_apply_theme_changes_the_palette(qapp):
     apply_theme(Theme.LIGHT)
 
 
+def test_follow_system_clears_the_override_before_asking_the_os(qapp, monkeypatch):
+    """A forced Light/Dark scheme masks the OS, so it must be dropped first.
+
+    Otherwise switching from a forced theme to "Follow system" reads back the
+    forced choice and never follows the OS. Offscreen Qt cannot reproduce the
+    masking itself, so this checks the order of the two calls.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QStyleHints
+
+    from comiccleaner.gui import theme
+
+    events: list[str] = []
+    real_set = QStyleHints.setColorScheme
+
+    def recording_set(self, scheme):
+        events.append("reset" if scheme is Qt.ColorScheme.Unknown else "force")
+        return real_set(self, scheme)
+
+    def recording_query() -> bool:
+        events.append("query")
+        return False
+
+    monkeypatch.setattr(QStyleHints, "setColorScheme", recording_set)
+    monkeypatch.setattr(theme, "system_is_dark", recording_query)
+
+    apply_theme(Theme.SYSTEM)
+
+    assert events == ["reset", "query"]
+
+
 def test_semantic_colours_differ_between_themes(qapp):
     apply_theme(Theme.LIGHT)
     light_delete = colour("delete").name()

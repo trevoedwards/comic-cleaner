@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import os
+import sys
 import zipfile
 from pathlib import Path
 
@@ -22,7 +23,7 @@ from comiccleaner.core.remover import (
     build_plans,
     is_backup_name,
 )
-from comiccleaner.core import remover
+from comiccleaner.core import extern, remover
 from comiccleaner.core.scanner import find_archives, scan_archive, scan_archives
 
 from .conftest import make_flat_page, make_page, write_archive
@@ -529,3 +530,25 @@ def test_one_unexpected_failure_does_not_lose_the_report(library: Path, monkeypa
     assert len(report.results) == 3
     assert len(report.succeeded) == 2
     assert len(report.failed) == 1 and "boom" in report.failed[0].error
+
+
+def test_external_tools_never_wait_on_stdin() -> None:
+    """A password prompt from 7-Zip/UnRAR must hit EOF, not hang the scan.
+
+    The parent's stdin is swapped for an open pipe that never delivers data -
+    what a terminal looks like to a child that asks a question.
+    """
+    read_end, write_end = os.pipe()
+    saved = os.dup(0)
+    os.dup2(read_end, 0)
+    try:
+        result = extern._run(
+            [sys.executable, "-c", "import sys; sys.exit(0 if sys.stdin.read() == '' else 1)"],
+            timeout=10,
+        )
+    finally:
+        os.dup2(saved, 0)
+        for fd in (saved, read_end, write_end):
+            os.close(fd)
+
+    assert result.returncode == 0

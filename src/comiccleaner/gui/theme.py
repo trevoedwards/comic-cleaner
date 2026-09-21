@@ -78,8 +78,9 @@ def apply_theme(theme: Theme) -> None:
     if app is None:
         return
 
-    dark = system_is_dark() if theme is Theme.SYSTEM else theme is Theme.DARK
-
+    # The override goes first. While an earlier Light/Dark choice is still in force,
+    # colorScheme() reports that choice rather than the OS, so asking for the
+    # system preference before clearing it would leave "Follow system" stuck.
     hints = app.styleHints()
     if hasattr(hints, "setColorScheme"):
         hints.setColorScheme(
@@ -89,6 +90,8 @@ def apply_theme(theme: Theme) -> None:
                 Theme.SYSTEM: Qt.ColorScheme.Unknown,
             }[theme]
         )
+
+    dark = system_is_dark() if theme is Theme.SYSTEM else theme is Theme.DARK
 
     app.setPalette(_dark_palette() if dark else _light_palette())
     _is_dark = dark

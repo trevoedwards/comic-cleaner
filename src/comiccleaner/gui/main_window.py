@@ -399,6 +399,8 @@ class MainWindow(QMainWindow):
         if self._scan_worker is not None:
             self._scan_worker.cancel()
             return
+        if self._removal_worker is not None:
+            return  # archives are being rewritten; hashing them now would race it
         if not self.archives:
             QMessageBox.information(self, "Nothing to scan", "Import some archives first.")
             return
@@ -652,6 +654,8 @@ class MainWindow(QMainWindow):
     # -- removal -----------------------------------------------------------
     @Slot()
     def apply_removals(self) -> None:
+        if self._scan_worker is not None or self._removal_worker is not None:
+            return
         marked = [g for g in self.groups if g.decision is Decision.DELETE]
         if not marked:
             QMessageBox.information(
@@ -935,9 +939,10 @@ class MainWindow(QMainWindow):
 
     def _refresh_status(self) -> None:
         stats = summarise(self.groups)
-        self.act_apply.setEnabled(
-            stats["marked_pages"] > 0 and self._removal_worker is None
-        )
+        # Marking groups mid-scan used to re-enable this while the groups on screen
+        # were about to be replaced by the scan's results.
+        idle = self._scan_worker is None and self._removal_worker is None
+        self.act_apply.setEnabled(stats["marked_pages"] > 0 and idle)
         if not self.groups:
             if any(a.pages for a in self.archives.values()):
                 self.status_label.setText("No duplicate pages found with these settings.")

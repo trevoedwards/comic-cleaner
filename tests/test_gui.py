@@ -192,6 +192,40 @@ def test_dry_run_reports_honestly_and_keeps_the_library_intact(
     assert all(info.pages for info in window.archives.values())
 
 
+def test_apply_stays_disabled_while_a_scan_or_removal_is_running(window, library):
+    window.import_paths([library])
+    window.settings.threshold = 8
+    scan_and_wait(window)
+    window._set_all_decisions(Decision.DELETE)
+    assert window.act_apply.isEnabled()
+
+    window._scan_worker = object()  # stands in for a scan in flight
+    try:
+        window._refresh_status()
+        assert not window.act_apply.isEnabled()
+    finally:
+        window._scan_worker = None
+
+    window._removal_worker = object()
+    try:
+        window._refresh_status()
+        assert not window.act_apply.isEnabled()
+    finally:
+        window._removal_worker = None
+    window._refresh_status()
+    assert window.act_apply.isEnabled()
+
+
+def test_scan_cannot_start_while_archives_are_being_rewritten(window, library):
+    window.import_paths([library])
+    window._removal_worker = object()
+    try:
+        window.start_scan()
+        assert window._scan_worker is None
+    finally:
+        window._removal_worker = None
+
+
 def test_ignoring_a_group_hides_it_permanently(window, library):
     window.import_paths([library])
     window.settings.threshold = 8

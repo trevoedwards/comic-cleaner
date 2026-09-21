@@ -108,6 +108,9 @@ def _run(cmd: list[str], *, timeout: int = 600) -> subprocess.CompletedProcess[b
     return subprocess.run(
         cmd,
         capture_output=True,
+        # Without this the tool inherits our stdin, and a password-protected
+        # archive makes 7-Zip/UnRAR wait at a prompt nobody can answer.
+        stdin=subprocess.DEVNULL,
         timeout=timeout,
         **_QUIET_LAUNCH,
     )
