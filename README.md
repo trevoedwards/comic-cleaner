@@ -84,6 +84,50 @@ how you spot an advert whose issue number or date changes from book to book.
 Similar groups list the copies furthest from the reference first, so any page
 that single-linkage chained in shows up at the start, not buried.
 
+## Command line
+
+The same pipeline runs without a window, for scripts, schedulers and library
+post-processing hooks. It never loads Qt, so it works on a headless server, and
+it shares the GUI's hash cache and ignore list, so a book the GUI has already
+scanned costs nothing to scan again.
+
+```bash
+comiccleaner scan  /path/to/comics                  # report what repeats; changes nothing
+comiccleaner scan  /path/to/comics --json           # the same, for another program
+comiccleaner clean /path/to/comics --all --dry-run  # what a clean would do
+comiccleaner clean /path/to/comics --all --yes      # do it, unattended
+comiccleaner clean /path/to/comics --group 8c193c   # one group, by an ID from scan
+```
+
+Matching options (`--threshold`, `--min-copies`, `--min-books`,
+`--include-first-page`, `--skip-last-page`, `--include-blank`) take the GUI's
+defaults, but not its saved settings, so a script means the same thing whatever
+someone last picked in the Settings dialog. `--exact-only` keeps only
+byte-identical groups even at a looser threshold, which is the safest thing to
+automate. Run `comiccleaner clean --help` for everything else, including
+`--output`, `--backup-dir`, `--no-backup` and `--delete-backups`.
+
+`clean` asks before changing anything and refuses outright when nobody is there
+to answer, so an unattended run needs `--yes`. It also skips any book that would
+lose more than a quarter of its pages (`--max-fraction` sets the limit). Adverts
+are a page or three, and a larger match usually means two copies of the same
+issue are matching each other page for page. Ctrl+C stops after the current book.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Done |
+| `1` | Some books could not be read or cleaned (the rest were) |
+| `2` | Bad options, or a refusal. Nothing was changed |
+| `130` | Interrupted |
+
+> [!NOTE]
+> **Windows:** the regular `ComicCleaner.exe` is a windowed app, and a windowed
+> app has no console, so it cannot report back to a terminal. Use
+> `comiccleaner-cli.exe` from the release page instead. It is the same program
+> built as a console app. **macOS and Linux:** the regular binary works from a
+> terminal; on macOS it is inside the app, at
+> `ComicCleaner.app/Contents/MacOS/ComicCleaner`.
+
 ## How matching works
 
 | Signal | Catches | Shown as |
@@ -157,7 +201,7 @@ Back up anything irreplaceable before a large run, and try the dry run first.
 python build.py --clean --smoke-test
 ```
 
-Options: `--onedir`, `--console`, `--clean`, `--smoke-test`, and `--smoke-only`
+Options: `--onedir`, `--console`, `--cli`, `--clean`, `--smoke-test`, and `--smoke-only`
 (re-test whatever is already in `dist/` without rebuilding). It runs the same on
 Windows, macOS and Linux, and uses the project `.venv` if there is one.
 
@@ -166,6 +210,11 @@ Windows, macOS and Linux, and uses the project `.venv` if there is one.
 | Windows | `dist/ComicCleaner.exe` | embedded `.ico` |
 | macOS | `dist/ComicCleaner.app` | embedded `.icns` |
 | Linux | `dist/ComicCleaner` | bundled PNG at runtime |
+| Any, with `--cli` | `dist/comiccleaner-cli[.exe]` | embedded, as above |
+
+`--cli` builds the console variant for the command line. Only Windows needs it
+(CI builds it there), and its smoke test runs a real `scan --json` rather than
+just launching it.
 
 > [!NOTE]
 > PyInstaller cannot cross-compile — each binary must be built on the OS it
@@ -182,6 +231,7 @@ git tag v0.1.0 && git push origin v0.1.0
 
 CI builds every platform and, if the tag matches both version numbers, publishes
 a GitHub release with `ComicCleaner-<version>-windows-x64.exe`,
+`comiccleaner-cli-<version>-windows-x64.exe`,
 `…-macos-arm64.zip`, `…-linux-x64.tar.gz` and a `SHA256SUMS.txt`.
 
 ## When something goes wrong

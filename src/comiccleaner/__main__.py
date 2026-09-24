@@ -1,4 +1,4 @@
-"""Entry point for the GUI."""
+"""Entry point: the GUI, or the headless scan and clean commands."""
 
 from __future__ import annotations
 
@@ -10,10 +10,24 @@ from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> int:
+    args_in = sys.argv[1:] if argv is None else argv
+    # "scan" and "clean" are the headless commands. They are checked before the
+    # GUI's parser so that `comiccleaner FOLDER` still just opens the window, and
+    # they never import Qt, so they work on a server with no display.
+    from comiccleaner import cli
+
+    if args_in and args_in[0] in cli.COMMANDS:
+        from comiccleaner import crashlog
+
+        crashlog.install()
+        return cli.main(args_in)
+
     parser = argparse.ArgumentParser(
         prog="comiccleaner",
         description="Find and remove duplicate pages (ads, injected images) "
         "across comic archives.",
+        epilog="Headless commands: 'comiccleaner scan PATH...' reports duplicates and "
+        "'comiccleaner clean PATH...' removes them. Add --help to either for options.",
     )
     parser.add_argument(
         "paths",
@@ -28,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Scan PATHS headlessly and report what was found, then exit. "
         "Use this to check a packaged build without a display.",
     )
-    args = parser.parse_args(argv)
+    args = parser.parse_args(args_in)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,

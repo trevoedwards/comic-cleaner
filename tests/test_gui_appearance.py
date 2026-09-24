@@ -140,7 +140,8 @@ def test_restyle_recolours_group_rows_for_the_theme(window, library):
 # -- column alignment ------------------------------------------------------
 
 
-def test_all_three_columns_share_body_geometry(window):
+def test_all_three_columns_share_body_geometry(window, library):
+    window.import_paths([library])  # an empty library shows the welcome page instead
     window.resize(1400, 860)
     window.show()
     QCoreApplication.processEvents()
@@ -154,7 +155,8 @@ def test_all_three_columns_share_body_geometry(window):
     assert len({s[1] for s in spans}) == 1, f"bottoms differ: {spans}"
 
 
-def test_panel_chrome_is_fixed_height(window):
+def test_panel_chrome_is_fixed_height(window, library):
+    window.import_paths([library])
     window.show()
     QCoreApplication.processEvents()
     # The body starts below exactly one header plus the layout margin.

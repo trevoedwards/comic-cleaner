@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -36,6 +37,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSplitter,
+    QStackedWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -44,11 +46,26 @@ from PySide6.QtWidgets import (
 from .. import APP_NAME, GITHUB_URL
 from ..core.archive import ARCHIVE_SUFFIXES
 from ..core.cache import HashCache
+from ..core.extern import (
+    SEVENZIP_URL,
+    can_extract,
+    install_hint,
+    refresh_backends,
+    sevenzip_path,
+)
 from ..core.grouping import build_groups, sort_groups, summarise
-from ..core.model import ArchiveInfo, Decision, DuplicateGroup, MatchKind, PageEntry
+from ..core.model import (
+    ArchiveInfo,
+    ArchiveKind,
+    Decision,
+    DuplicateGroup,
+    MatchKind,
+    PageEntry,
+)
 from ..core.remover import build_plans, is_backup_name
 from ..core.scanner import find_archives
 from ..resources import app_icon
+from ..units import human_bytes
 from .about import AboutDialog
 from .ignored import IgnoredDialog
 from .preview import PagePreviewDialog, page_distance
@@ -56,6 +73,7 @@ from .session import SESSION_FILE, SavedDecision, Session, load_session, save_se
 from .settings import AppSettings, SettingsDialog, cache_path
 from .theme import apply_theme, colour
 from .thumbs import THUMB_SIZE, ThumbnailCache
+from .welcome import WelcomePanel
 from .workers import RemovalWorker, ScanWorker
 
 log = logging.getLogger(__name__)
@@ -74,15 +92,6 @@ SORT_MODES = [
     ("Number of copies", "count"),
     ("Image size", "size"),
 ]
-
-
-def human_bytes(count: int) -> str:
-    value = float(count)
-    for unit in ("B", "KB", "MB", "GB"):
-        if value < 1024 or unit == "GB":
-            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
-        value /= 1024
-    return f"{value:.1f} GB"
 
 
 class MainWindow(QMainWindow):
@@ -143,7 +152,23 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 0)
         splitter.setStretchFactor(2, 1)
         splitter.setSizes([280, 380, 740])
-        self.setCentralWidget(splitter)
+        self.review = splitter
+
+        # An empty library gets a welcome page in place of three blank columns.
+        self.welcome = WelcomePanel()
+        self.welcome.add_folder.connect(self.add_folder)
+        self.welcome.add_files.connect(self.add_files)
+        self.views = QStackedWidget()
+        self.views.addWidget(self.welcome)
+        self.views.addWidget(self.review)
+
+        central = QWidget()
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._build_tools_banner())
+        layout.addWidget(self.views, 1)
+        self.setCentralWidget(central)
 
         self.progress = QProgressBar()
         self.progress.setMaximumWidth(260)
@@ -390,12 +415,95 @@ class MainWindow(QMainWindow):
         self.detail_header = panel.title_label
         return panel
 
+    # -- archive tools -----------------------------------------------------
+    def _build_tools_banner(self) -> QFrame:
+        """Says so up front when imported books cannot be read on this machine."""
+        banner = QFrame()
+        banner.setObjectName("toolsBanner")
+        row = QHBoxLayout(banner)
+        row.setContentsMargins(10, 6, 10, 6)
+        self.tools_banner_text = QLabel()
+        self.tools_banner_text.setWordWrap(True)
+        self.tools_banner_text.setOpenExternalLinks(True)
+        self.tools_banner_text.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction
+        )
+        check = QPushButton("Check Again")
+        check.setToolTip("Look for 7-Zip, UnRAR and bsdtar again, without restarting.")
+        check.clicked.connect(self.recheck_archive_tools)
+        dismiss = QPushButton("Dismiss")
+        dismiss.clicked.connect(self._dismiss_tools_banner)
+        row.addWidget(self.tools_banner_text, 1)
+        row.addWidget(check)
+        row.addWidget(dismiss)
+        banner.setVisible(False)
+        self.tools_banner = banner
+        # How many unreadable books there were when the banner was dismissed; it
+        # comes back only if more are imported.
+        self._banner_dismissed_at = 0
+        return banner
+
+    def _books_needing_a_tool(self) -> list[ArchiveInfo]:
+        return [
+            a for a in self.archives.values()
+            if a.kind in _NEEDS_TOOL and not can_extract(a.kind.value)
+        ]
+
+    def _update_tools_banner(self) -> None:
+        blocked = self._books_needing_a_tool()
+        if not blocked:
+            self._banner_dismissed_at = 0
+            self.tools_banner.setVisible(False)
+            return
+        if len(blocked) <= self._banner_dismissed_at:
+            return
+        self.tools_banner_text.setText(
+            f"<b>{len(blocked)} book(s) cannot be read yet:</b> .cbr and .cb7 files need "
+            f"an archive tool that is not installed. {install_hint()}, then press "
+            f'Check Again. <a href="{SEVENZIP_URL}">Get 7-Zip</a>'
+        )
+        self.tools_banner.setVisible(True)
+
+    @Slot()
+    def _dismiss_tools_banner(self) -> None:
+        self._banner_dismissed_at = len(self._books_needing_a_tool())
+        self.tools_banner.setVisible(False)
+
+    @Slot()
+    def recheck_archive_tools(self) -> None:
+        """Pick up a tool installed since launch, and let failed books be retried."""
+        refresh_backends()
+        self.welcome.refresh()
+        retry = 0
+        for path, info in list(self.archives.items()):
+            if info.error and info.kind in _NEEDS_TOOL and can_extract(info.kind.value):
+                self.archives[path] = ArchiveInfo(
+                    path=path, kind=info.kind, size=0, mtime_ns=0
+                )
+                retry += 1
+        self._refresh_archive_list()
+        if self._books_needing_a_tool():
+            self.status_label.setText(
+                f"Still no 7-Zip, UnRAR or bsdtar found. {install_hint()}."
+            )
+        elif retry:
+            self.status_label.setText(
+                f"Archive tool found. Press Scan to read the {retry} book(s) that failed."
+            )
+        else:
+            self.status_label.setText("Archive tool found. .cbr and .cb7 books can be read.")
+
     # -- drag and drop -----------------------------------------------------
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
+            self.welcome.set_drag_active(True)
+
+    def dragLeaveEvent(self, event: object) -> None:
+        self.welcome.set_drag_active(False)
 
     def dropEvent(self, event: QDropEvent) -> None:
+        self.welcome.set_drag_active(False)
         paths = [
             Path(url.toLocalFile())
             for url in event.mimeData().urls()
@@ -491,12 +599,19 @@ class MainWindow(QMainWindow):
 
         unreadable = [a for a in self.archives.values() if a.error]
         if unreadable:
+            hint = ""
+            # Windows' own tar and UnRAR miss some formats that 7-Zip reads.
+            if sevenzip_path() is None and any(a.kind in _NEEDS_TOOL for a in unreadable):
+                hint = (
+                    "\n\n7-Zip reads more .cbr and .cb7 files than the other tools. "
+                    f"{install_hint()}."
+                )
             names = "\n".join(f"  {a.path.name}: {a.error}" for a in unreadable[:8])
             more = f"\n  ...and {len(unreadable) - 8} more" if len(unreadable) > 8 else ""
             QMessageBox.warning(
                 self,
                 "Some archives could not be read",
-                f"{len(unreadable)} archive(s) were skipped:\n\n{names}{more}",
+                f"{len(unreadable)} archive(s) were skipped:\n\n{names}{more}{hint}",
             )
 
     @Slot()
@@ -564,6 +679,8 @@ class MainWindow(QMainWindow):
         self.library_summary.setText(
             f"{len(self.archives)} archive(s), {scanned} scanned, {pages} pages."
         )
+        self.views.setCurrentWidget(self.review if self.archives else self.welcome)
+        self._update_tools_banner()
 
     def _refresh_group_list(self) -> None:
         # Stay on the group being reviewed. If it is gone (just ignored, say), land
@@ -1175,6 +1292,12 @@ class MainWindow(QMainWindow):
 
     def _restyle(self) -> None:
         """Re-apply colours that are not driven by the palette."""
+        self.welcome.refresh()
+        warning = colour("warning").name()
+        self.tools_banner.setStyleSheet(
+            f"#toolsBanner {{ border: 1px solid {warning}; border-radius: 6px; }}"
+        )
+        self.tools_banner_text.setStyleSheet(f"color: {warning};")
         self.detail_warning.setStyleSheet(f"color: {colour('warning').name()};")
         self.detail_hint.setStyleSheet(f"color: {colour('muted').name()};")
         self.library_summary.setStyleSheet(f"color: {colour('muted').name()};")
@@ -1290,6 +1413,10 @@ class _ConfirmDialog(QDialog):
 
     def dry_run(self) -> bool:
         return self.chk_dry_run.isChecked()
+
+
+# Archive kinds that need an external tool to be read at all.
+_NEEDS_TOOL = (ArchiveKind.RAR, ArchiveKind.SEVENZIP)
 
 
 def _decision_colour(decision: Decision) -> QColor:

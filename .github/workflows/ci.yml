@@ -108,6 +108,13 @@ jobs:
         # gets caught instead of shipping.
         run: python build.py --clean --smoke-test
 
+      - name: Build and smoke-test the command-line exe
+        if: runner.os == 'Windows'
+        # The normal exe is windowed, and a windowed exe has no stdout, so a
+        # shell can neither read its output nor wait for its exit code. Windows
+        # gets a console build for scan/clean; elsewhere one binary serves both.
+        run: python build.py --cli --smoke-test
+
       - name: Self-test the packaged build
         if: runner.os != 'Windows'
         # Windowed builds have no stdout, so the report goes to a file; on
@@ -129,7 +136,9 @@ jobs:
           version=$(grep '^__version__' src/comiccleaner/__init__.py | cut -d'"' -f2)
           mkdir release
           case "$RUNNER_OS" in
-            Windows) cp dist/ComicCleaner.exe "release/ComicCleaner-$version-windows-x64.exe" ;;
+            Windows)
+              cp dist/ComicCleaner.exe "release/ComicCleaner-$version-windows-x64.exe"
+              cp dist/comiccleaner-cli.exe "release/comiccleaner-cli-$version-windows-x64.exe" ;;
             macOS) ditto -c -k --keepParent dist/ComicCleaner.app "release/ComicCleaner-$version-macos-arm64.zip" ;;
             Linux) tar -czf "release/ComicCleaner-$version-linux-x64.tar.gz" -C dist ComicCleaner ;;
           esac

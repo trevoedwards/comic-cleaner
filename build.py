@@ -4,7 +4,11 @@ PyInstaller cannot cross-compile, so this must run on the OS you are targeting:
 Windows produces ComicCleaner.exe, macOS a ComicCleaner.app bundle, and Linux a
 single ComicCleaner executable.
 
-    python build.py [--onedir] [--console] [--clean] [--smoke-test | --smoke-only]
+    python build.py [--onedir] [--console | --cli] [--clean] [--smoke-test | --smoke-only]
+
+--cli builds comiccleaner-cli, a console build for the scan and clean commands.
+Windows needs it because the normal exe is windowed; elsewhere the normal binary
+already works from a terminal.
 """
 
 from __future__ import annotations
@@ -21,6 +25,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 APP_NAME = "ComicCleaner"
+# The console build of the same program, for the scan and clean commands. The
+# normal build is windowed, and on Windows a windowed exe has no stdout at all:
+# a shell neither waits for it nor sees its output or its exit code. Lower case
+# and hyphenated, so it cannot collide with ComicCleaner.exe on a
+# case-insensitive filesystem.
+CLI_NAME = "comiccleaner-cli"
 ENTRY_POINT = ROOT / "src" / "comiccleaner" / "__main__.py"
 
 IS_WINDOWS = sys.platform == "win32"
@@ -95,18 +105,20 @@ def add_data_argument() -> list[str]:
     return ["--add-data", f"{source}{separator}comiccleaner/assets"]
 
 
-def output_path(onedir: bool) -> Path:
+def output_path(onedir: bool, *, cli: bool = False) -> Path:
     dist = ROOT / "dist"
-    if IS_MACOS and not onedir:
+    name = CLI_NAME if cli else APP_NAME
+    if IS_MACOS and not onedir and not cli:
         # --windowed on macOS always produces a .app bundle.
-        return dist / f"{APP_NAME}.app"
-    binary = f"{APP_NAME}.exe" if IS_WINDOWS else APP_NAME
-    return dist / APP_NAME / binary if onedir else dist / binary
+        return dist / f"{name}.app"
+    binary = f"{name}.exe" if IS_WINDOWS else name
+    return dist / name / binary if onedir else dist / binary
 
 
 def build(args: argparse.Namespace) -> Path:
     python = venv_python()
     ensure_pyinstaller(python)
+    name = CLI_NAME if args.cli else APP_NAME
 
     if args.clean:
         for folder in ("build", "dist"):
@@ -120,7 +132,7 @@ def build(args: argparse.Namespace) -> Path:
         "PyInstaller",
         "--noconfirm",
         "--name",
-        APP_NAME,
+        name,
         "--paths",
         str(ROOT / "src"),
         "--collect-submodules",
@@ -128,20 +140,20 @@ def build(args: argparse.Namespace) -> Path:
         # --collect-submodules only gathers code, so the icon needs saying too.
         *add_data_argument(),
         "--onedir" if args.onedir else "--onefile",
-        "--console" if args.console else "--windowed",
+        "--console" if (args.console or args.cli) else "--windowed",
         *icon_argument(),
     ]
     for module in EXCLUDED_MODULES:
         command += ["--exclude-module", module]
     command.append(str(ENTRY_POINT))
 
-    print(f"Building {APP_NAME} for {sys.platform}...", flush=True)
+    print(f"Building {name} for {sys.platform}...", flush=True)
     started = time.monotonic()
     result = subprocess.run(command, cwd=ROOT)
     if result.returncode != 0:
         raise SystemExit(f"PyInstaller failed with exit code {result.returncode}")
 
-    produced = output_path(args.onedir)
+    produced = output_path(args.onedir, cli=args.cli)
     if not produced.exists():
         raise SystemExit(f"Build reported success but {produced} is missing")
 
@@ -162,9 +174,9 @@ def _size_of(path: Path) -> int:
 def _executable_within(produced: Path) -> Path:
     """The runnable file, which is nested inside a .app bundle on macOS."""
     if produced.suffix == ".app":
-        return produced / "Contents" / "MacOS" / APP_NAME
+        return produced / "Contents" / "MacOS" / produced.stem
     if produced.is_dir():
-        return produced / APP_NAME
+        return produced / produced.name
     return produced
 
 
@@ -232,7 +244,7 @@ def smoke_test(produced: Path, seconds: int = 15) -> int:
                 exited_early = True
             except subprocess.TimeoutExpired:
                 exited_early = False
-                _terminate_tree(process, APP_NAME)
+                _terminate_tree(process, executable.stem)
 
         output = (
             err_file.read_text("utf-8", errors="replace")
@@ -256,6 +268,80 @@ def smoke_test(produced: Path, seconds: int = 15) -> int:
     return 0
 
 
+def _tiny_png(size: int = 16) -> bytes:
+    """A small valid PNG, built by hand so this script needs no Pillow."""
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    rows = b"".join(
+        b"\x00"
+        + b"".join(
+            bytes((x * 16 % 256, y * 16 % 256, (x ^ y) * 16 % 256)) for x in range(size)
+        )
+        for y in range(size)
+    )
+    header = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
+    )
+
+
+def smoke_test_cli(produced: Path) -> int:
+    """Run the console build's headless commands for real.
+
+    Launching it bare would open the GUI with a console attached, which proves
+    little. Instead: the self-test (codecs survived packaging), then a JSON scan
+    of a generated book, whose output has to parse and add up.
+    """
+    import json
+    import zipfile
+
+    executable = _executable_within(produced)
+    print(f"\nSmoke-testing {executable.name}...", flush=True)
+    with tempfile.TemporaryDirectory() as workspace:
+        books = Path(workspace) / "books"
+        books.mkdir()
+        with zipfile.ZipFile(books / "Smoke Test.cbz", "w") as zf:
+            zf.writestr("page1.png", _tiny_png(16))
+            zf.writestr("page2.png", _tiny_png(24))
+
+        checks = [
+            (["--self-test"], None),
+            (
+                ["scan", str(books), "--json", "--no-cache", "--quiet"],
+                lambda out: json.loads(out)["library"]["pages"] == 2,
+            ),
+        ]
+        for arguments, verify in checks:
+            label = " ".join(arguments[:1])
+            try:
+                result = subprocess.run(
+                    [str(executable), *arguments],
+                    capture_output=True, text=True, cwd=workspace, timeout=180,
+                )
+            except subprocess.TimeoutExpired:
+                print(f"FAILED - {label} did not finish")
+                return 1
+            output = (result.stdout + result.stderr).strip()
+            try:
+                ok = result.returncode == 0 and (verify is None or verify(result.stdout))
+            except (ValueError, KeyError, TypeError):
+                ok = False
+            if not ok or any(marker in output for marker in CRASH_MARKERS):
+                print(f"FAILED - {label} (exit {result.returncode}):")
+                print(output)
+                return 1
+            print(f"PASS - {label}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -265,6 +351,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--console", action="store_true", help="Keep the console so tracebacks show."
+    )
+    parser.add_argument(
+        "--cli",
+        action="store_true",
+        help=f"Build the console variant, {CLI_NAME}, for the scan and clean commands.",
     )
     parser.add_argument(
         "--clean", action="store_true", help="Wipe build/ and dist/ first."
@@ -281,15 +372,16 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    check = smoke_test_cli if args.cli else smoke_test
     if args.smoke_only:
-        produced = output_path(args.onedir)
+        produced = output_path(args.onedir, cli=args.cli)
         if not produced.exists():
             raise SystemExit(f"Nothing to test: {produced} does not exist")
-        return smoke_test(produced)
+        return check(produced)
 
     produced = build(args)
     if args.smoke_test:
-        return smoke_test(produced)
+        return check(produced)
 
     hint = "python build.py --smoke-test"
     print(f"Verify it starts with: {hint}")

@@ -137,6 +137,36 @@ def test_executable_inside_a_mac_bundle_is_found(build_module, tmp_path):
     assert found.name == "ComicCleaner"
 
 
+def test_windows_cli_build_is_its_own_exe(build_module, monkeypatch):
+    _retarget(build_module, monkeypatch, windows=True, macos=False)
+
+    cli = build_module.output_path(onedir=False, cli=True)
+    gui = build_module.output_path(onedir=False)
+
+    assert cli.name == "comiccleaner-cli.exe"
+    # Windows filenames ignore case, so the two must differ by more than that.
+    assert cli.name.lower() != gui.name.lower()
+
+
+def test_macos_cli_build_is_a_plain_binary(build_module, monkeypatch):
+    """Only --windowed makes a .app; the console build is a bare executable."""
+    _retarget(build_module, monkeypatch, windows=False, macos=True)
+
+    assert build_module.output_path(onedir=False, cli=True).name == "comiccleaner-cli"
+
+
+def test_cli_smoke_test_png_is_a_real_image(build_module):
+    """The console build is smoke-tested on this; a bad PNG would fail every build."""
+    import io
+
+    from PIL import Image
+
+    with Image.open(io.BytesIO(build_module._tiny_png(24))) as img:
+        img.load()
+        assert img.size == (24, 24)
+        assert img.mode == "RGB"
+
+
 # -- source portability ----------------------------------------------------
 
 

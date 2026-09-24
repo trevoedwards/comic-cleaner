@@ -105,6 +105,31 @@ def describe_backends() -> dict[str, str | None]:
     }
 
 
+def can_extract(kind: str) -> bool:
+    """Whether any installed tool can read this kind of archive ("rar" or "7z")."""
+    if sevenzip_path() or bsdtar_path():
+        return True
+    return kind == "rar" and unrar_path() is not None
+
+
+def refresh_backends() -> None:
+    """Forget what was detected, so a tool installed since launch is found."""
+    for finder in (sevenzip_path, unrar_path, bsdtar_path):
+        finder.cache_clear()
+
+
+SEVENZIP_URL = "https://www.7-zip.org/"
+
+
+def install_hint() -> str:
+    """How to get a RAR/7z reader on this platform, as a clause to end a sentence."""
+    if sys.platform == "win32":
+        return "Install 7-Zip (free, from 7-zip.org) or WinRAR"
+    if sys.platform == "darwin":
+        return "Install 7-Zip with Homebrew (brew install sevenzip)"
+    return "Install 7-Zip from your package manager (the 7zip or p7zip-full package)"
+
+
 def _run(cmd: list[str], *, timeout: int = 600) -> subprocess.CompletedProcess[bytes]:
     log.debug("running %s", cmd)
     return subprocess.run(
