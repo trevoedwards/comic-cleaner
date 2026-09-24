@@ -53,6 +53,43 @@ CREATE TABLE IF NOT EXISTS ignored_hashes (
     dhash INTEGER NOT NULL,
     PRIMARY KEY (gid, dhash)
 );
+
+-- Known junk: pages removed from the library before (or imported from someone
+-- else's list), marked for removal again wherever they turn up.
+CREATE TABLE IF NOT EXISTS known (
+    sid        TEXT PRIMARY KEY,
+    note       TEXT,
+    source     TEXT NOT NULL DEFAULT 'removed',
+    thumbnail  BLOB,
+    created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
+);
+CREATE TABLE IF NOT EXISTS known_hashes (
+    sid   TEXT NOT NULL,
+    dhash INTEGER NOT NULL,
+    PRIMARY KEY (sid, dhash)
+);
+
+-- Every real removal run, so any book in it can be put back from its backup.
+CREATE TABLE IF NOT EXISTS runs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+    source     TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS run_items (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          INTEGER NOT NULL,
+    archive         TEXT NOT NULL,
+    output          TEXT NOT NULL,
+    backup          TEXT,
+    removed         INTEGER NOT NULL,
+    pages           TEXT NOT NULL,
+    bytes_freed     INTEGER NOT NULL,
+    converted       INTEGER NOT NULL,
+    output_size     INTEGER,
+    output_mtime_ns INTEGER,
+    restored_at     REAL
+);
+CREATE INDEX IF NOT EXISTS run_items_run ON run_items(run_id);
 """
 
 # Columns added to `ignored` after it first shipped, so the manager can show a
@@ -69,6 +106,18 @@ class IgnoredEntry:
     created_at: float
     sample_path: Path | None
     sample_name: str | None
+
+
+@dataclass(slots=True)
+class KnownEntry:
+    """One remembered piece of junk, as listed in the manager or exported."""
+
+    sid: str
+    note: str
+    source: str  # "removed" here, or "imported" from a shared list
+    created_at: float
+    thumbnail: bytes | None  # PNG; the page itself is gone from the library
+    hashes: set[int]
 
 
 _SIGN_BIT = 1 << 63
@@ -124,7 +173,10 @@ class HashCache:
         row = self.conn.execute(
             "SELECT size, mtime_ns FROM archives WHERE path = ?", (key,)
         ).fetchone()
-        if row is None or row[0] != size or row[1] != mtime_ns:
+        if row is None:
+            if not self._adopt_moved(key, size, mtime_ns):
+                return None
+        elif row[0] != size or row[1] != mtime_ns:
             return None
         rows = self.conn.execute(
             "SELECT name, idx, size, width, height, content_sha, dhash, flat, error "
@@ -146,6 +198,47 @@ class HashCache:
             )
             for r in rows
         ]
+
+    def _adopt_moved(self, key: str, size: int, mtime_ns: int) -> bool:
+        """Reuse the hashes of a book that was moved, renamed folder and all.
+
+        The cache is keyed on the full path, so moving a library would otherwise
+        mean decoding every page again. A book with the same file name, size and
+        nanosecond modification time as exactly one cached book is taken to be
+        that book: moves and copies keep all three. A rename changes the name, so
+        it is simply hashed again, which is safe. If the old path is gone this was
+        a move and the entry is re-keyed; if it is still there, it is copied.
+        """
+        name = Path(key).name
+        candidates = [
+            r[0]
+            for r in self.conn.execute(
+                "SELECT path FROM archives WHERE size = ? AND mtime_ns = ?", (size, mtime_ns)
+            )
+            if Path(r[0]).name == name and r[0] != key
+        ]
+        if len(candidates) != 1:
+            return False
+        old = candidates[0]
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO archives(path, size, mtime_ns) VALUES (?, ?, ?)",
+                (key, size, mtime_ns),
+            )
+            if Path(old).exists():
+                self.conn.execute(
+                    "INSERT INTO pages(path, name, idx, size, width, height, content_sha, "
+                    "dhash, flat, error) SELECT ?, name, idx, size, width, height, "
+                    "content_sha, dhash, flat, error FROM pages WHERE path = ?",
+                    (key, old),
+                )
+            else:
+                # Pages move to the new row before the old one goes: the foreign key
+                # cascades deletes but does not follow a renamed key.
+                self.conn.execute("UPDATE pages SET path = ? WHERE path = ?", (key, old))
+                self.conn.execute("DELETE FROM archives WHERE path = ?", (old,))
+        log.debug("reused cached hashes of %s for %s", old, key)
+        return True
 
     def put(self, path: Path, size: int, mtime_ns: int, pages: list[PageEntry]) -> None:
         key = str(Path(path).resolve())
@@ -236,3 +329,111 @@ class HashCache:
         with self._lock, self.conn:
             self.conn.execute("DELETE FROM ignored")
             self.conn.execute("DELETE FROM ignored_hashes")
+
+    # -- known junk --------------------------------------------------------
+    def known_hashes(self) -> set[int]:
+        with self._lock:
+            return {
+                _to_unsigned(r[0])
+                for r in self.conn.execute("SELECT dhash FROM known_hashes")
+            }
+
+    def known_entries(self) -> list[KnownEntry]:
+        """Everything remembered, most recent first."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT sid, note, source, created_at, thumbnail FROM known "
+                "ORDER BY created_at DESC, sid"
+            ).fetchall()
+            hashes: dict[str, set[int]] = {}
+            for sid, dhash in self.conn.execute("SELECT sid, dhash FROM known_hashes"):
+                hashes.setdefault(sid, set()).add(_to_unsigned(dhash))
+        return [
+            KnownEntry(
+                sid=r[0], note=r[1] or "", source=r[2], created_at=float(r[3]),
+                thumbnail=bytes(r[4]) if r[4] is not None else None,
+                hashes=hashes.get(r[0], set()),
+            )
+            for r in rows
+        ]
+
+    def remember(
+        self,
+        sid: str,
+        hashes: Iterable[int],
+        *,
+        note: str = "",
+        thumbnail: bytes | None = None,
+        source: str = "removed",
+    ) -> bool:
+        """Add a piece of known junk, merging with an entry of the same id.
+
+        Merging rather than replacing means removing the same advert again, now
+        with a re-encoded copy among it, widens what is recognised. Returns True
+        if the entry is new.
+        """
+        with self._lock, self.conn:
+            existing = self.conn.execute(
+                "SELECT thumbnail FROM known WHERE sid = ?", (sid,)
+            ).fetchone()
+            if existing is None:
+                self.conn.execute(
+                    "INSERT INTO known(sid, note, source, thumbnail) VALUES (?, ?, ?, ?)",
+                    (sid, note, source, thumbnail),
+                )
+            elif existing[0] is None and thumbnail is not None:
+                self.conn.execute(
+                    "UPDATE known SET thumbnail = ? WHERE sid = ?", (thumbnail, sid)
+                )
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO known_hashes(sid, dhash) VALUES (?, ?)",
+                [(sid, _to_signed(h)) for h in set(hashes)],
+            )
+        return existing is None
+
+    def forget(self, sid: str) -> None:
+        with self._lock, self.conn:
+            self.conn.execute("DELETE FROM known WHERE sid = ?", (sid,))
+            self.conn.execute("DELETE FROM known_hashes WHERE sid = ?", (sid,))
+
+    def clear_known(self) -> None:
+        with self._lock, self.conn:
+            self.conn.execute("DELETE FROM known")
+            self.conn.execute("DELETE FROM known_hashes")
+
+    # -- removal history ---------------------------------------------------
+    def add_run(self, source: str, items: list[tuple]) -> int:
+        """Store one run. Each item is (archive, output, backup, removed, pages_json,
+        bytes_freed, converted, output_size, output_mtime_ns). Returns the run id."""
+        with self._lock, self.conn:
+            cursor = self.conn.execute("INSERT INTO runs(source) VALUES (?)", (source,))
+            run_id = int(cursor.lastrowid)
+            self.conn.executemany(
+                "INSERT INTO run_items(run_id, archive, output, backup, removed, pages, "
+                "bytes_freed, converted, output_size, output_mtime_ns) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                [(run_id, *item) for item in items],
+            )
+        return run_id
+
+    def run_rows(self) -> list[tuple]:
+        """(id, started_at, source) for every run, newest first."""
+        with self._lock:
+            return self.conn.execute(
+                "SELECT id, started_at, source FROM runs ORDER BY started_at DESC, id DESC"
+            ).fetchall()
+
+    def run_item_rows(self) -> list[tuple]:
+        with self._lock:
+            return self.conn.execute(
+                "SELECT id, run_id, archive, output, backup, removed, pages, bytes_freed, "
+                "converted, output_size, output_mtime_ns, restored_at "
+                "FROM run_items ORDER BY run_id DESC, archive"
+            ).fetchall()
+
+    def mark_restored(self, item_id: int) -> None:
+        with self._lock, self.conn:
+            self.conn.execute(
+                "UPDATE run_items SET restored_at = strftime('%s','now') WHERE id = ?",
+                (item_id,),
+            )

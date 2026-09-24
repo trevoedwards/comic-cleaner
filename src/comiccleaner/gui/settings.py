@@ -52,6 +52,8 @@ class AppSettings:
     compress: bool = False
     theme: str = "system"
     restore_session: bool = True
+    remember_junk: bool = True
+    check_updates: bool = False  # opt-in: it is the app's only network request
 
     def grouping(self) -> GroupingOptions:
         return GroupingOptions(
@@ -112,6 +114,8 @@ class AppSettings:
             restore_session=_as_bool(
                 store.value("restore_session", defaults.restore_session)
             ),
+            remember_junk=_as_bool(store.value("remember_junk", defaults.remember_junk)),
+            check_updates=_as_bool(store.value("check_updates", defaults.check_updates)),
         )
 
     def save(self) -> None:
@@ -232,6 +236,14 @@ class SettingsDialog(QDialog):
             "Unchanged books come back from the hash cache, so this costs almost nothing."
         )
         form.addRow(self.restore_session)
+
+        self.check_updates = QCheckBox("Check for a new version when the app starts")
+        self.check_updates.setChecked(settings.check_updates)
+        self.check_updates.setToolTip(
+            "Asks GitHub for the latest release number, and nothing else. No details of "
+            "your library or computer are sent."
+        )
+        form.addRow(self.check_updates)
         return box
 
     def _preview_theme(self, index: int) -> None:
@@ -314,6 +326,16 @@ class SettingsDialog(QDialog):
         self.output_dir.set_value(settings.output_dir)
         form.addRow("Write cleaned copies to:", self.output_dir)
 
+        self.remember_junk = QCheckBox(
+            "Remember removed pages, and mark them for removal in new books"
+        )
+        self.remember_junk.setChecked(settings.remember_junk)
+        self.remember_junk.setToolTip(
+            "Once a library is clean an advert no longer repeats, so a new book's "
+            "copy would go unnoticed. Remembered pages are found even in one book."
+        )
+        form.addRow(self.remember_junk)
+
         self.compress = QCheckBox("Deflate images when rebuilding (slower, rarely smaller)")
         self.compress.setChecked(settings.compress)
         form.addRow(self.compress)
@@ -360,4 +382,6 @@ class SettingsDialog(QDialog):
             compress=self.compress.isChecked(),
             theme=str(self.theme.currentData()),
             restore_session=self.restore_session.isChecked(),
+            remember_junk=self.remember_junk.isChecked(),
+            check_updates=self.check_updates.isChecked(),
         )

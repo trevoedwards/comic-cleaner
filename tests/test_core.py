@@ -16,7 +16,7 @@ from comiccleaner.core.cache import HashCache
 from comiccleaner.core.comicinfo import update_comicinfo
 from comiccleaner.core.grouping import GroupingOptions, build_groups
 from comiccleaner.core.hashing import digest_image, hamming
-from comiccleaner.core.model import ArchiveKind, Decision, MatchKind
+from comiccleaner.core.model import ArchiveKind, Decision, MatchKind, PageEntry
 from comiccleaner.core.remover import (
     BackupPolicy,
     RemovalPlan,
@@ -766,3 +766,162 @@ def test_unusable_output_folder_is_reported_plainly(tmp_path: Path) -> None:
     assert result.error is not None and result.error.startswith("cannot write to")
     assert "unexpected" not in result.error
     assert scan_archive(book).page_count == 3
+
+
+# -- position and review ---------------------------------------------------
+
+
+def _books_with_ad_at(root: Path, position: int, *, pages: int = 10, books: int = 2) -> Path:
+    ad = make_page(seed=7777)
+    for number in range(books):
+        story = [make_page(seed=number * 1000 + position * 50 + i) for i in range(pages - 1)]
+        story.insert(position, ad)
+        write_archive(root / f"B{number}.cbz", story)
+    return root
+
+
+def test_near_edge_counts_three_pages_in_from_either_end() -> None:
+    from comiccleaner.core.grouping import near_edge
+
+    def page(index: int):
+        return PageEntry(
+            archive=Path("x.cbz"), name="p", index=index, size=0, width=0, height=0,
+            content_sha="", dhash=0,
+        )
+
+    assert [near_edge(page(i), 10) for i in range(10)] == [
+        True, True, True, False, False, False, False, True, True, True,
+    ]
+    assert near_edge(page(5), 0)  # unknown length is never called mid-book
+
+
+def test_a_match_that_only_sits_mid_book_is_flagged_and_not_safe(tmp_path: Path) -> None:
+    from comiccleaner.core.grouping import is_safe, review_warnings
+
+    archives = scan_archives(find_archives([_books_with_ad_at(tmp_path / "mid", 5)]))
+    [group] = build_groups(archives, GroupingOptions())
+
+    assert group.edge_share == 0
+    assert any("mid-book" in w for w in review_warnings(group))
+    assert not is_safe(group)
+
+
+def test_an_identical_page_at_the_back_of_several_books_is_safe(tmp_path: Path) -> None:
+    from comiccleaner.core.grouping import is_safe, review_warnings
+
+    archives = scan_archives(find_archives([_books_with_ad_at(tmp_path / "end", 9)]))
+    [group] = build_groups(archives, GroupingOptions())
+
+    assert group.edge_share == 1
+    assert review_warnings(group) == []
+    assert is_safe(group)
+    assert not is_safe(group, min_books=3)  # the book minimum still applies
+
+
+def test_similar_groups_are_never_safe_without_being_known(library: Path) -> None:
+    from comiccleaner.core.grouping import is_safe
+
+    [group] = build_groups(scan_archives(find_archives([library])), GroupingOptions(threshold=8))
+
+    assert group.kind is MatchKind.SIMILAR
+    assert not is_safe(group)
+    group.known = True
+    assert is_safe(group)
+
+
+def test_known_junk_in_one_book_is_not_warned_about_being_in_one_book(tmp_path: Path) -> None:
+    from comiccleaner.core.grouping import review_warnings
+
+    archives = scan_archives(find_archives([_books_with_ad_at(tmp_path / "one", 9, books=1)]))
+    ad_hash = archives[0].pages[9].dhash
+    [group] = build_groups(archives, GroupingOptions(), known={ad_hash})
+
+    assert not any("one book" in w for w in review_warnings(group))
+
+
+def test_edge_matches_rank_above_mid_book_ones_with_the_same_spread(tmp_path: Path) -> None:
+    from comiccleaner.core.grouping import sort_groups
+
+    ad_mid, ad_end = make_page(seed=8001), make_page(seed=8002)
+    for number in range(2):
+        story = [make_page(seed=number * 100 + i) for i in range(10)]
+        story.insert(5, ad_mid)
+        story.append(ad_end)
+        write_archive(tmp_path / f"B{number}.cbz", story)
+    archives = scan_archives(find_archives([tmp_path]))
+
+    groups = build_groups(archives, GroupingOptions())
+    assert [g.edge_share for g in groups] == [1.0, 0.0]
+    assert [g.edge_share for g in sort_groups(groups, "books")] == [1.0, 0.0]
+
+
+# -- moved libraries -------------------------------------------------------
+
+
+def _no_decoding(monkeypatch) -> None:
+    from comiccleaner.core import scanner
+
+    def fail(*a, **k):
+        raise AssertionError("a book the cache already knew was hashed again")
+
+    monkeypatch.setattr(scanner, "digest_image", fail)
+
+
+def test_a_moved_library_keeps_its_cached_hashes(
+    library: Path, tmp_path: Path, monkeypatch
+) -> None:
+    import shutil
+
+    cache = HashCache(tmp_path / "cache.sqlite")
+    before = scan_archive(library / "Book 01.cbz", cache)
+    moved = tmp_path / "elsewhere" / "library"
+    shutil.move(str(library), str(moved))
+
+    _no_decoding(monkeypatch)
+    after = scan_archive(moved / "Book 01.cbz", cache)
+
+    assert [p.dhash for p in after.pages] == [p.dhash for p in before.pages]
+    assert all(p.archive == moved / "Book 01.cbz" for p in after.pages)
+    # A move re-keys the entry rather than leaving the old path behind.
+    rows = cache.conn.execute("SELECT path FROM archives").fetchall()
+    assert [Path(r[0]).parent.name for r in rows] == ["library"]
+    assert str(moved.resolve()) in rows[0][0]
+    cache.close()
+
+
+def test_a_copied_book_reuses_the_hashes_and_keeps_the_original(
+    library: Path, tmp_path: Path, monkeypatch
+) -> None:
+    import shutil
+
+    cache = HashCache(tmp_path / "cache.sqlite")
+    scan_archive(library / "Book 01.cbz", cache)
+    copy = tmp_path / "copy" / "Book 01.cbz"
+    copy.parent.mkdir()
+    shutil.copy2(library / "Book 01.cbz", copy)  # keeps the modification time
+
+    _no_decoding(monkeypatch)
+    scan_archive(copy, cache)
+    scan_archive(library / "Book 01.cbz", cache)  # the original is still cached too
+
+    assert cache.conn.execute("SELECT COUNT(*) FROM archives").fetchone()[0] == 2
+    cache.close()
+
+
+def test_a_different_book_with_the_same_size_is_not_mistaken_for_it(
+    library: Path, tmp_path: Path
+) -> None:
+    """Name, size and nanosecond time must all agree; here the name does not."""
+    import os
+    import shutil
+
+    cache = HashCache(tmp_path / "cache.sqlite")
+    scan_archive(library / "Book 01.cbz", cache)
+    other = tmp_path / "other" / "Totally Different.cbz"
+    other.parent.mkdir()
+    shutil.copy2(library / "Book 02.cbz", other)
+    source = (library / "Book 01.cbz").stat()
+    os.utime(other, ns=(source.st_atime_ns, source.st_mtime_ns))
+
+    assert cache.get(other, other.stat().st_size, other.stat().st_mtime_ns) is None
+    cache.close()

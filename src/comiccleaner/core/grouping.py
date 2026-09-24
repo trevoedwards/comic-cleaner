@@ -21,6 +21,11 @@ _CHUNK_BUDGET_BYTES = 50_000_000
 # Below this many distinct hashes, a full pairwise sweep beats building an index.
 _BRUTE_FORCE_LIMIT = 4000
 
+# "Near the start or end of a book", in pages. Credits follow the cover and
+# adverts are tacked on at the back, so anything this close to either edge is
+# where junk is expected to be.
+EDGE_PAGES = 3
+
 
 @dataclass(slots=True)
 class GroupingOptions:
@@ -126,22 +131,70 @@ def _cluster_by_distance(hashes: np.ndarray, threshold: int) -> list[list[int]]:
     return list(buckets.values())
 
 
-def _near_ignored(hashes: np.ndarray, ignored: np.ndarray, threshold: int) -> np.ndarray:
-    """Mask of `hashes` lying within `threshold` of any ignored hash.
+def _near(hashes: np.ndarray, targets: Collection[int], threshold: int) -> np.ndarray:
+    """Mask of `hashes` lying within `threshold` of any of `targets`.
 
-    Matching at the current threshold, not exactly, is what lets an ignore made at
-    one setting hold at another: loosen the threshold and re-encoded variants of
-    the ignored page stay hidden too, rather than resurfacing as a "new" group.
+    Matching at the current threshold, not exactly, is what lets an ignore (or a
+    remembered page) made at one setting hold at another: loosen the threshold
+    and re-encoded variants of the page are caught too.
     """
     mask = np.zeros(len(hashes), dtype=bool)
-    if len(hashes) == 0 or len(ignored) == 0:
+    if len(hashes) == 0 or not targets:
         return mask
-    chunk = max(1, _CHUNK_BUDGET_BYTES // max(1, len(ignored) * 8))
+    wanted = np.array(sorted(targets), dtype=np.uint64)
+    chunk = max(1, _CHUNK_BUDGET_BYTES // max(1, len(wanted) * 8))
     for start in range(0, len(hashes), chunk):
         stop = min(start + chunk, len(hashes))
-        dist = hamming_matrix(hashes[start:stop], ignored)
+        dist = hamming_matrix(hashes[start:stop], wanted)
         mask[start:stop] = (dist <= threshold).any(axis=1)
     return mask
+
+
+def near_edge(page: PageEntry, page_count: int, edge: int = EDGE_PAGES) -> bool:
+    """Whether a page sits within `edge` pages of the start or end of its book."""
+    if page_count <= 0:
+        return True  # unknown length: no grounds to call it mid-book
+    return page.index < edge or page.index >= page_count - edge
+
+
+def edge_share(pages: Iterable[PageEntry], page_counts: dict) -> float:
+    listed = list(pages)
+    if not listed:
+        return 1.0
+    near = sum(near_edge(p, page_counts.get(p.archive, 0)) for p in listed)
+    return near / len(listed)
+
+
+def review_warnings(group: DuplicateGroup) -> list[str]:
+    """Reasons to look twice before removing a group, in plain words.
+
+    The GUI shows these above the copies, "Mark safe" skips any group that has
+    one, and the command line reports them in its JSON.
+    """
+    warnings = []
+    if any(p.flat for p in group.pages):
+        warnings.append("Contains blank or solid-colour pages.")
+    if group.archive_count == 1 and not group.known:
+        warnings.append("All copies are in one book — this may be intentional.")
+    if any(p.index == 0 for p in group.pages):
+        warnings.append("Includes a first page, which is usually the cover.")
+    if group.edge_share == 0:
+        warnings.append(
+            "Every copy sits mid-book; adverts and credits usually sit near the start or end."
+        )
+    return warnings
+
+
+def is_safe(group: DuplicateGroup, min_books: int = 2) -> bool:
+    """Removable without a second look: known junk, or an identical page across
+    enough books with nothing to warn about."""
+    if group.known:
+        return True
+    return (
+        group.kind is MatchKind.EXACT
+        and group.archive_count >= max(2, min_books)
+        and not review_warnings(group)
+    )
 
 
 def collect_pages(
@@ -170,14 +223,20 @@ def build_groups(
     archives: Iterable[ArchiveInfo],
     options: GroupingOptions | None = None,
     ignored: Collection[int] | None = None,
+    known: Collection[int] | None = None,
 ) -> list[DuplicateGroup]:
     """Cluster pages into duplicate groups, best candidates first.
 
     `ignored` holds perceptual hashes the user has said are not junk. Pages near
     any of them are dropped before clustering, so they neither show up nor chain
-    unrelated pages together.
+    unrelated pages together. Ignoring wins over `known`.
+
+    `known` holds hashes of pages removed from the library before. A cluster that
+    contains one is kept whatever the copy and book minimums say, and flagged.
     """
     opts = options or GroupingOptions()
+    archives = list(archives)
+    page_counts = {a.path: a.page_count for a in archives}
 
     pages = collect_pages(archives, opts)
     if not pages:
@@ -191,8 +250,8 @@ def build_groups(
 
     unique = np.array(sorted(by_hash), dtype=np.uint64)
     if ignored:
-        masked = np.array(sorted(ignored), dtype=np.uint64)
-        unique = unique[~_near_ignored(unique, masked, opts.threshold)]
+        unique = unique[~_near(unique, ignored, opts.threshold)]
+    known_mask = _near(unique, known or (), opts.threshold)
     clusters = _cluster_by_distance(unique, opts.threshold)
 
     groups: list[DuplicateGroup] = []
@@ -200,16 +259,23 @@ def build_groups(
         members: list[PageEntry] = []
         for idx in cluster:
             members.extend(by_hash[int(unique[idx])])
-        if len(members) < opts.min_pages:
-            continue
-        if len({p.archive for p in members}) < opts.min_archives:
-            continue
+        is_known = bool(known_mask[cluster].any())
+        if not is_known:
+            if len(members) < opts.min_pages:
+                continue
+            if len({p.archive for p in members}) < opts.min_archives:
+                continue
 
         distinct_content = {p.content_sha for p in members}
         kind = MatchKind.EXACT if len(distinct_content) == 1 else MatchKind.SIMILAR
         gid = group_id(members)
         members.sort(key=lambda p: (str(p.archive).lower(), p.index))
-        groups.append(DuplicateGroup(gid=gid, kind=kind, pages=members))
+        groups.append(
+            DuplicateGroup(
+                gid=gid, kind=kind, pages=members, known=is_known,
+                edge_share=edge_share(members, page_counts),
+            )
+        )
 
     groups.sort(key=_group_rank, reverse=True)
     return groups
@@ -226,14 +292,16 @@ def group_id(members: list[PageEntry]) -> str:
 
 def _group_rank(group: DuplicateGroup) -> tuple:
     # Spread across many books is the strongest "this is an ad" signal, then
-    # how much space removing it frees.
-    return (group.archive_count, group.recoverable_bytes, group.page_count)
+    # sitting where junk sits, then how much space removing it frees.
+    return (
+        group.archive_count, group.edge_share, group.recoverable_bytes, group.page_count
+    )
 
 
 def sort_groups(groups: list[DuplicateGroup], key: str) -> list[DuplicateGroup]:
     """Re-sort for the UI. `key` is one of: books, space, count, size."""
     keyfns = {
-        "books": lambda g: (g.archive_count, g.recoverable_bytes),
+        "books": lambda g: (g.archive_count, g.edge_share, g.recoverable_bytes),
         "space": lambda g: (g.recoverable_bytes, g.archive_count),
         "count": lambda g: (g.page_count, g.recoverable_bytes),
         "size": lambda g: (g.representative.width * g.representative.height,),

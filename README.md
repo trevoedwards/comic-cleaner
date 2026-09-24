@@ -51,12 +51,15 @@ python -m comiccleaner "/path/to/comics"        # paths are optional
 
 1. **Import** — drag archives or folders in, or use *Add Files* / *Add Folder*.
 2. **Scan** — pages are decoded and hashed, then cached against each file's size
-   and mtime, so re-scanning an unchanged library is instant.
-3. **Review** — groups are ranked by how many books they affect. All copies are
-   ticked for removal; untick any you want to keep. Double-click a page to see it
-   full size.
+   and mtime, so re-scanning an unchanged library is instant. The cache follows a
+   library that has been moved, too.
+3. **Review** — groups are ranked by how many books they affect, then by whether
+   they sit where junk sits (the first or last few pages). All copies are ticked
+   for removal; untick any you want to keep. Double-click a page to see it full
+   size. **Mark safe** marks only what needs no second look.
 4. **Apply** — a confirmation dialog spells out every change, with a dry run.
-   The books that were rewritten are rescanned automatically afterwards.
+   The books that were rewritten are rescanned automatically afterwards, and the
+   run can be undone from **History…** while its backups exist.
 
 > [!TIP]
 > Changing a matching setting re-groups instantly — it does not re-scan.
@@ -71,7 +74,7 @@ which is instant for any book the hash cache already knows.
 |---|---|
 | <kbd>D</kbd> | Remove the ticked copies of this group, then go to the next undecided group |
 | <kbd>K</kbd> | Keep this group, then go to the next undecided group |
-| <kbd>I</kbd> | Ignore this page from now on (undo it from **Ignored Pages…**) |
+| <kbd>I</kbd> | Ignore this page from now on (undo it from **Remembered Pages…**) |
 | <kbd>Space</kbd> | Tick or untick the selected copy |
 | <kbd>Enter</kbd> | Open the selected copy full size |
 | <kbd>Delete</kbd> | In the library, remove the selected books from the list (not from disk) |
@@ -83,6 +86,31 @@ In the full-size preview, <kbd>←</kbd> <kbd>→</kbd> step through the copies,
 how you spot an advert whose issue number or date changes from book to book.
 Similar groups list the copies furthest from the reference first, so any page
 that single-linkage chained in shows up at the start, not buried.
+
+### Narrowing the review
+
+- **Select books** in the library to see only the groups they contain, and type
+  in **Filter books** to find one. Each book shows how many of its pages repeat,
+  or how many are marked for removal.
+- The **group filter** shows only undecided, marked, known-junk, identical,
+  similar, or flagged groups. **Show all** clears both.
+- **Mark all** and **Clear all** act on the groups shown. **Mark safe** marks
+  known junk, and pages identical across enough books with nothing to warn about:
+  no blank pages, no covers, and not only mid-book.
+
+### Known junk
+
+Once a library is clean, the advert that used to repeat across forty books is
+gone, so the same advert arriving in book forty-one repeats against nothing and
+would never be grouped. So every page you remove is **remembered**: wherever it
+turns up again, even in a single new book, it is grouped as **known junk** and
+marked for removal. Apply still asks first.
+
+**Remembered Pages…** on the toolbar lists known junk with a thumbnail, and
+lets you forget any of it. **Export…** writes the list to a file and **Import…**
+merges in someone else's, so a list of one scanlation group's credit pages can
+be shared. Only import lists from people you trust: whatever is on one is marked
+for removal on sight. The setting *Remember removed pages* turns all of this off.
 
 ## Command line
 
@@ -97,15 +125,25 @@ comiccleaner scan  /path/to/comics --json           # the same, for another prog
 comiccleaner clean /path/to/comics --all --dry-run  # what a clean would do
 comiccleaner clean /path/to/comics --all --yes      # do it, unattended
 comiccleaner clean /path/to/comics --group 8c193c   # one group, by an ID from scan
+comiccleaner clean /incoming --known --yes          # only what was removed before
+comiccleaner known export junk.json                 # share the known-junk list
+comiccleaner history list                           # past runs
+comiccleaner history restore 12 --yes               # put run 12's books back
 ```
+
+`clean --known` is the one to schedule: it removes only pages already removed
+from this library once (or imported as known junk), so it never acts on a match
+nobody has looked at. `--edges 3` only removes copies within three pages of the
+start or end of a book, where adverts and credits sit. `scan --json` reports
+each group's warnings and position alongside its pages.
 
 Matching options (`--threshold`, `--min-copies`, `--min-books`,
 `--include-first-page`, `--skip-last-page`, `--include-blank`) take the GUI's
 defaults, but not its saved settings, so a script means the same thing whatever
 someone last picked in the Settings dialog. `--exact-only` keeps only
-byte-identical groups even at a looser threshold, which is the safest thing to
-automate. Run `comiccleaner clean --help` for everything else, including
-`--output`, `--backup-dir`, `--no-backup` and `--delete-backups`.
+byte-identical groups even at a looser threshold. Run `comiccleaner clean --help`
+for everything else, including `--output`, `--backup-dir`, `--no-backup`,
+`--delete-backups` and `--no-remember`.
 
 `clean` asks before changing anything and refuses outright when nobody is there
 to answer, so an unattended run needs `--yes`. It also skips any book that would
@@ -153,8 +191,14 @@ matches brute force. 50,000 pages at threshold 6: ~1.3 s instead of ~102 s.
 **Ignore** remembers every hash in the group, and hides any page within the
 current threshold of one of them. An ignore made at similarity 6 therefore
 still holds at 0, and one made at 0 also hides re-encoded copies once you
-loosen the setting. **Ignored Pages…** on the toolbar lists everything
-ignored, with a thumbnail, and brings any of it back.
+loosen the setting. Known junk matches the same way, and ignoring wins over it.
+**Remembered Pages…** on the toolbar lists everything ignored, with a
+thumbnail, and brings any of it back.
+
+**Position** counts too. Credits follow the cover and adverts are tacked on at
+the back, so a match within three pages of either end is ranked above one that
+only ever turns up mid-book, and a group found *only* mid-book is flagged: it is
+more likely a coincidence, or content that legitimately recurs.
 
 ## Settings
 
@@ -162,12 +206,14 @@ ignored, with a thumbnail, and brings any of it back.
 |---|---|---|
 | **Theme** | Follow system | Light, dark or the OS setting, previewed live. |
 | **Reopen the last library** | on | Brings back the books and review decisions from last time. Turning it off also deletes the saved session. |
+| **Check for a new version** | off | Asks GitHub for the latest release number when the app starts, and says so in the status bar if there is one. It is the app's only network request, and sends nothing about your library. *Help → Check for Updates…* asks once. |
 | **Similarity** | 0 | Hamming distance. `0` = identical only, `2`–`6` catches re-encodes, above ~`10` expect false matches. |
 | **Minimum copies** | 2 | Occurrences before a group is shown. |
 | **Across at least (books)** | 2 | Ads repeat across books. `1` also catches a page repeated within one book. |
 | **Never match first / last page** | on / off | Protects covers, which legitimately repeat across a series. |
 | **Include blank pages** | off | Blank pages look alike to *any* perceptual hash. |
 | **Delete backups after a run** | off | Sweeps `.bak` files once every archive in the run has succeeded. |
+| **Remember removed pages** | on | Keeps known junk, and marks it for removal in new books. |
 | **Write cleaned copies to** | *(in place)* | Point at a folder to leave originals untouched. Books keep their folder layout underneath it, and an existing file is never overwritten. |
 
 ## Safety
@@ -188,6 +234,12 @@ Removal is the only destructive operation, and it is deliberately paranoid:
 Backups are kept by default. Clear them from the removal-finished dialog, from
 **Clean Up Backups…** on the toolbar, automatically via Settings, or keep them
 out of the way entirely with a backup folder.
+
+Every run is recorded. **History…** on the toolbar (or `comiccleaner history`)
+lists them, and puts any book back exactly as it was while its backup exists:
+the cleaned version is discarded, and a `.cbr` that was rebuilt as `.cbz` gets
+its `.cbr` back. A book changed since the run is left alone rather than
+overwritten. **Export CSV…** writes the whole record out for a spreadsheet.
 
 > [!WARNING]
 > `.cbr` and `.cb7` cannot be written to. Removing pages from one produces a

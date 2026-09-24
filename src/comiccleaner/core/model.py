@@ -75,11 +75,6 @@ class ArchiveInfo:
     def readable(self) -> bool:
         return self.error is None
 
-    @property
-    def writable(self) -> bool:
-        """RAR/7z cannot be rewritten in place; they get converted to CBZ."""
-        return self.error is None
-
 
 @dataclass(slots=True)
 class DuplicateGroup:
@@ -91,6 +86,14 @@ class DuplicateGroup:
     decision: Decision = Decision.UNDECIDED
     # Pages explicitly excluded from removal by the user (by PageEntry.key).
     kept: set[tuple[str, str]] = field(default_factory=set)
+    # Matches a page removed from the library before. Such a group is shown even
+    # below the copy and book minimums: once the old books are clean, the same
+    # advert in a new book has nothing left to repeat against.
+    known: bool = False
+    # Share of the copies within a few pages of the start or end of their book,
+    # which is where adverts and credits sit. A match found only mid-book is more
+    # likely to be a coincidence, or content that legitimately recurs.
+    edge_share: float = 1.0
 
     @property
     def archive_count(self) -> int:

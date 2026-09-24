@@ -6,7 +6,9 @@ matching option is a flag with the GUI's default, so a script means the same
 thing no matter what someone last chose in the Settings dialog.
 
     comiccleaner scan  PATH... [matching options] [--json]
-    comiccleaner clean PATH... (--all | --group ID...) [--dry-run] [--yes] ...
+    comiccleaner clean PATH... (--all | --known | --group ID...) [--dry-run] [--yes] ...
+    comiccleaner known (list | export FILE | import FILE | forget ID...)
+    comiccleaner history (list | restore RUN)
 
 Exit codes: 0 success, 1 some archives could not be read or cleaned, 2 bad
 usage or a refusal (nothing was changed), 130 interrupted.
@@ -26,16 +28,24 @@ from typing import Any, TextIO
 
 from . import __version__
 from .core.cache import HashCache
-from .core.grouping import GroupingOptions, build_groups
+from .core.grouping import GroupingOptions, build_groups, near_edge, review_warnings
+from .core.history import load_history, record_run, restore, when
 from .core.model import ArchiveInfo, Decision, DuplicateGroup, MatchKind
 from .core.remover import BackupPolicy, RemovalPlan, RemovalReport, apply_removals, build_plans
 from .core.scanner import find_archives, scan_archives
+from .core.signatures import (
+    SignatureFileError,
+    capture_samples,
+    export_known,
+    import_known,
+    learn_from_run,
+)
 from .paths import cache_path
 from .units import human_bytes
 
 log = logging.getLogger(__name__)
 
-COMMANDS = ("scan", "clean")
+COMMANDS = ("scan", "clean", "known", "history")
 
 EXIT_OK = 0
 EXIT_FAILURES = 1
@@ -125,6 +135,11 @@ def _matching_options(parser: argparse.ArgumentParser) -> None:
         "--include-ignored", action="store_true",
         help="Also report pages ignored in the GUI.",
     )
+    group.add_argument(
+        "--no-known", action="store_true",
+        help="Leave out the known-junk list (pages removed before, which are otherwise "
+        "found even in a single book).",
+    )
 
 
 def _common_options(parser: argparse.ArgumentParser) -> None:
@@ -179,11 +194,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--group", action="append", default=[], metavar="ID", dest="groups",
         help="Remove this group (an ID from 'scan', or a unique prefix of one). Repeatable.",
     )
+    which.add_argument(
+        "--known", action="store_true", dest="known_only",
+        help="Remove only known junk: pages removed from the library before. The "
+        "safest thing to run unattended on new books.",
+    )
     safety = clean.add_argument_group("safety")
     safety.add_argument("-n", "--dry-run", action="store_true",
                         help="Report what would happen and change nothing.")
     safety.add_argument("-y", "--yes", action="store_true",
                         help="Do not ask for confirmation. Required when not run from a terminal.")
+    safety.add_argument(
+        "--edges", type=int, metavar="N",
+        help="Only remove copies within N pages of the start or end of a book, where "
+        "adverts and credits sit. Copies further in are left alone.",
+    )
     safety.add_argument(
         "--max-fraction", type=float, default=DEFAULT_MAX_FRACTION, metavar="F",
         help="Skip any book that would lose more than this share of its pages "
@@ -202,10 +227,51 @@ def build_parser() -> argparse.ArgumentParser:
     )
     output.add_argument("--compress", action="store_true",
                         help="Deflate images when rebuilding (slower, rarely smaller).")
+    output.add_argument(
+        "--no-remember", action="store_true",
+        help="Do not add what this run removes to the known-junk list.",
+    )
+
+    known = commands.add_parser(
+        "known", help="List, export, import or forget known junk.",
+        description="Known junk is every page removed from the library before. It is "
+        "found and removed wherever it turns up again, even in a single book. The list "
+        "is shared with the GUI.",
+    )
+    known.add_argument("--cache", type=Path, metavar="FILE",
+                       help="Hash cache to use (default: the one the GUI uses).")
+    known.add_argument("-v", "--verbose", action="store_true", help="Debug logging.")
+    actions = known.add_subparsers(dest="action", required=True, metavar="ACTION")
+    listing = actions.add_parser("list", help="Show what is remembered.")
+    listing.add_argument("--json", action="store_true", help="Machine-readable output.")
+    export = actions.add_parser("export", help="Write the list to a file to share.")
+    export.add_argument("file", type=Path, metavar="FILE")
+    load = actions.add_parser("import", help="Merge in a list someone else exported.")
+    load.add_argument("file", type=Path, metavar="FILE")
+    forget = actions.add_parser("forget", help="Stop treating these pages as junk.")
+    forget.add_argument("ids", nargs="+", metavar="ID", help="IDs from 'known list'.")
+
+    history = commands.add_parser(
+        "history", help="List past removals, or restore one from its backups.",
+        description="Every removal run, from the GUI or here, is recorded. A run's books "
+        "can be put back exactly as they were while their backups still exist.",
+    )
+    history.add_argument("--cache", type=Path, metavar="FILE",
+                         help="Hash cache to use (default: the one the GUI uses).")
+    history.add_argument("-v", "--verbose", action="store_true", help="Debug logging.")
+    steps = history.add_subparsers(dest="action", required=True, metavar="ACTION")
+    past = steps.add_parser("list", help="Show past runs.")
+    past.add_argument("--json", action="store_true", help="Machine-readable output.")
+    undo = steps.add_parser("restore", help="Put a run's books back from their backups.")
+    undo.add_argument("run", type=int, metavar="RUN", help="A run number from 'history list'.")
+    undo.add_argument("-y", "--yes", action="store_true",
+                      help="Do not ask for confirmation. Required when not run from a terminal.")
     return parser
 
 
 def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.command in ("known", "history"):
+        return
     if not 0 <= args.threshold <= 32:
         parser.error("--threshold must be between 0 and 32")
     if args.min_copies < 2:
@@ -217,6 +283,8 @@ def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
     if args.command == "clean":
         if not 0 < args.max_fraction <= 1:
             parser.error("--max-fraction must be above 0 and at most 1")
+        if args.edges is not None and args.edges < 1:
+            parser.error("--edges must be at least 1")
         if args.no_backup and (args.backup_dir or args.delete_backups):
             parser.error("--no-backup cannot be combined with --backup-dir or --delete-backups")
         if args.output and (args.backup_dir or args.no_backup or args.delete_backups):
@@ -285,7 +353,8 @@ def _groups(
     args: argparse.Namespace, archives: list[ArchiveInfo], cache: HashCache | None
 ) -> list[DuplicateGroup]:
     ignored = set() if (args.include_ignored or cache is None) else cache.ignored_hashes()
-    groups = build_groups(archives, grouping_options(args), ignored=ignored)
+    known = set() if (args.no_known or cache is None) else cache.known_hashes()
+    groups = build_groups(archives, grouping_options(args), ignored=ignored, known=known)
     if args.exact_only:
         groups = [g for g in groups if g.kind is MatchKind.EXACT]
     return groups
@@ -395,6 +464,9 @@ def _group_json(group: DuplicateGroup) -> dict[str, Any]:
     return {
         "id": group.gid,
         "kind": _kind(group),
+        "known": group.known,
+        "edge_share": round(group.edge_share, 3),
+        "warnings": review_warnings(group),
         "copies": group.page_count,
         "books": group.archive_count,
         "bytes": group.recoverable_bytes,
@@ -432,11 +504,12 @@ def _print_groups(
         file=out,
     )
     print(file=out)
-    print(f"  {'ID':<16}  {'KIND':<9}  {'COPIES':>6}  {'BOOKS':>5}  {'SIZE':>9}  SAMPLE", file=out)
+    print(f"  {'ID':<16}  {'KIND':<10}  {'COPIES':>6}  {'BOOKS':>5}  {'SIZE':>9}  SAMPLE", file=out)
     for group in groups:
         rep = group.representative
         print(
-            f"  {group.gid:<16}  {_kind(group):<9}  {group.page_count:>6}  "
+            f"  {group.gid:<16}  {_kind(group) + ('*' if group.known else ''):<10}  "
+            f"{group.page_count:>6}  "
             f"{group.archive_count:>5}  {human_bytes(group.recoverable_bytes):>9}  "
             f"{rep.archive.name} p{rep.index + 1}",
             file=out,
@@ -447,6 +520,13 @@ def _print_groups(
                     f"{'':20}{_display(page.archive, root)}  p{page.index + 1}  ({page.name})",
                     file=out,
                 )
+    if any(g.known for g in groups):
+        print(file=out)
+        print(
+            "  * known junk: removed from this library before, so it is found even in "
+            "a single book. 'clean --known' removes only these.",
+            file=out,
+        )
 
 
 def _result_json(report: RemovalReport, skipped: list[RemovalPlan]) -> dict[str, Any]:
@@ -482,6 +562,8 @@ def _dump_clean(
     report: RemovalReport,
     skipped: list[RemovalPlan],
     deleted: tuple[int, int] | None = None,
+    remembered: int = 0,
+    spared: int = 0,
 ) -> None:
     payload = {
         "version": JSON_VERSION,
@@ -489,6 +571,8 @@ def _dump_clean(
         "library": _library_json(archives),
         **_result_json(report, skipped),
         "backups_deleted": deleted[0] if deleted else 0,
+        "remembered": remembered,
+        "spared_mid_book": spared,
     }
     json.dump(payload, out, indent=2)
     out.write("\n")
@@ -574,11 +658,23 @@ def _run_clean(
     interrupt: _Interrupt,
 ) -> int:
     groups = _groups(args, archives, cache)
-    chosen = groups if args.all else select_groups(groups, args.groups)
+    if args.all:
+        chosen = groups
+    elif args.known_only:
+        chosen = [g for g in groups if g.known]
+    else:
+        chosen = select_groups(groups, args.groups)
     for group in chosen:
         group.decision = Decision.DELETE
 
     counts = {a.path: a.page_count for a in archives}
+    spared = 0
+    if args.edges is not None:
+        for group in chosen:
+            for page in group.pages_to_remove():
+                if not near_edge(page, counts.get(page.archive, 0), args.edges):
+                    group.kept.add(page.key)
+                    spared += 1
     plans, skipped = split_by_fraction(build_plans(chosen, counts), args.max_fraction)
 
     human = err if args.json else out  # keep stdout pure JSON
@@ -586,9 +682,16 @@ def _run_clean(
     if not (args.json and args.quiet):
         _print_library(archives, human)
         print(file=human)
+        if spared:
+            print(
+                f"Leaving {spared} cop{'y' if spared == 1 else 'ies'} more than {args.edges} "
+                "page(s) from either end of its book alone (--edges).",
+                file=human,
+            )
+            print(file=human)
     if not plans:
         if args.json:
-            _dump_clean(out, args, archives, RemovalReport(), skipped)
+            _dump_clean(out, args, archives, RemovalReport(), skipped, spared=spared)
         else:
             print("Nothing to remove.", file=out)
             if skipped:
@@ -603,6 +706,10 @@ def _run_clean(
             raise _Refusal(_UNATTENDED)
         if not _confirm("Remove these pages?", out, stdin, err):
             raise _Refusal("Cancelled. Nothing was changed.")
+
+    learn = cache is not None and not args.dry_run and not args.no_remember
+    # Thumbnails first: the pages will not exist once the run is over.
+    samples = capture_samples(chosen) if learn else {}
 
     if args.no_backup:
         backup = BackupPolicy(enabled=False)
@@ -625,22 +732,140 @@ def _run_clean(
     if cache is not None and not args.dry_run:
         for result in report.succeeded:
             cache.invalidate(result.archive)
+        record_run(cache, plans, report, "cli")
+    remembered = learn_from_run(cache, chosen, report, samples) if learn and cache else 0
 
     deleted: tuple[int, int] | None = None
     if args.delete_backups and not args.dry_run and not report.failed and not report.cancelled:
         deleted = _delete_backups(report)
 
     if args.json:
-        _dump_clean(out, args, archives, report, skipped, deleted)
+        _dump_clean(out, args, archives, report, skipped, deleted, remembered, spared)
     else:
         _print_report(report, args.dry_run, out, root)
         if deleted is not None:
             print(f"Deleted {deleted[0]} backup(s), reclaiming {human_bytes(deleted[1])}.",
                   file=out)
+        if remembered:
+            print(f"Remembered {remembered} new page(s) as known junk.", file=out)
 
     if report.cancelled:
         return EXIT_INTERRUPTED
     failed = report.failed or any(a.error for a in archives)
+    return EXIT_FAILURES if failed else EXIT_OK
+
+
+def _run_known(args: argparse.Namespace, cache: HashCache, out: TextIO) -> int:
+    """List, share and prune the known-junk list."""
+    if args.action == "list":
+        entries = cache.known_entries()
+        if args.json:
+            json.dump(
+                {
+                    "version": JSON_VERSION,
+                    "known": [
+                        {"id": e.sid, "note": e.note, "source": e.source,
+                         "hashes": sorted(f"{h:016x}" for h in e.hashes)}
+                        for e in entries
+                    ],
+                },
+                out, indent=2,
+            )
+            out.write("\n")
+        elif not entries:
+            print("Nothing is remembered yet. Pages are added when they are removed.", file=out)
+        else:
+            print(f"{len(entries)} remembered page(s):", file=out)
+            for entry in entries:
+                print(f"  {entry.sid}  {entry.source:<8}  {entry.note}", file=out)
+        return EXIT_OK
+    if args.action == "export":
+        count = export_known(cache.known_entries(), args.file)
+        print(f"Wrote {count} remembered page(s) to {args.file}.", file=out)
+        return EXIT_OK
+    if args.action == "import":
+        try:
+            result = import_known(cache, args.file)
+        except SignatureFileError as exc:
+            raise _Refusal(f"{exc}. Nothing was imported.") from exc
+        print(f"Added {result.added}; {result.merged} were already known.", file=out)
+        return EXIT_OK
+    # forget
+    known = {e.sid for e in cache.known_entries()}
+    for raw in args.ids:
+        matches = [sid for sid in known if sid.startswith(raw.lower())]
+        if len(matches) != 1:
+            raise _Refusal(
+                f"No remembered page {raw!r}" if not matches
+                else f"Prefix {raw!r} is ambiguous: {', '.join(sorted(matches)[:5])}"
+            )
+        cache.forget(matches[0])
+        print(f"Forgot {matches[0]}.", file=out)
+    return EXIT_OK
+
+
+def _run_history(
+    args: argparse.Namespace, cache: HashCache, out: TextIO, err: TextIO, stdin: TextIO
+) -> int:
+    """List past removal runs, or put a run's books back from their backups."""
+    runs = load_history(cache)
+    if args.action == "list":
+        if args.json:
+            json.dump(
+                {
+                    "version": JSON_VERSION,
+                    "runs": [
+                        {
+                            "id": run.id, "when": when(run.started_at), "source": run.source,
+                            "books": [
+                                {"archive": str(i.archive), "output": str(i.output),
+                                 "backup": str(i.backup) if i.backup else None,
+                                 "removed": i.removed, "pages": i.pages,
+                                 "restorable": i.restorable, "status": i.status()[1]}
+                                for i in run.items
+                            ],
+                        }
+                        for run in runs
+                    ],
+                },
+                out, indent=2,
+            )
+            out.write("\n")
+        elif not runs:
+            print("No removals yet.", file=out)
+        else:
+            for run in runs:
+                restorable = sum(1 for i in run.items if i.restorable)
+                print(
+                    f"Run {run.id}  {when(run.started_at)}  {run.source}: {run.removed} page(s) "
+                    f"from {len(run.items)} book(s), {restorable} restorable",
+                    file=out,
+                )
+        return EXIT_OK
+
+    run = next((r for r in runs if r.id == args.run), None)
+    if run is None:
+        raise _Refusal(f"No run {args.run}. 'history list' shows the runs.")
+    items = [i for i in run.items if i.restorable]
+    for item in run.items:
+        if not item.restorable:
+            print(f"  skipping {item.archive.name}: {item.status()[1]}", file=out)
+    if not items:
+        raise _Refusal(f"Nothing in run {run.id} can be restored.")
+    for item in items:
+        print(f"  {item.archive}: put back, {item.removed} page(s) return", file=out)
+    if not args.yes:
+        if not stdin.isatty():
+            raise _Refusal(_UNATTENDED)
+        if not _confirm(f"Restore {len(items)} book(s)?", out, stdin, err):
+            raise _Refusal("Cancelled. Nothing was changed.")
+    failed = 0
+    for item in items:
+        error = restore(cache, item)
+        if error is not None:
+            failed += 1
+            print(f"  {item.archive.name}: not restored: {error}", file=out)
+    print(f"Restored {len(items) - failed} of {len(items)} book(s).", file=out)
     return EXIT_FAILURES if failed else EXIT_OK
 
 
@@ -666,12 +891,30 @@ def main(
     )
 
     cache: HashCache | None = None
-    if not args.no_cache:
+    if not getattr(args, "no_cache", False):
         try:
             cache = HashCache(args.cache or cache_path())
         except Exception as exc:  # a broken cache slows things down; it is not fatal
             print(f"warning: hash cache unavailable ({exc}); hashing everything",
                   file=err)
+
+    if args.command in ("known", "history"):
+        if cache is None:
+            print(f"comiccleaner: {args.command} lives in the hash cache, which is "
+                  "unavailable", file=err)
+            return EXIT_REFUSED
+        try:
+            if args.command == "history":
+                return _run_history(args, cache, out, err, inp)
+            return _run_known(args, cache, out)
+        except _Refusal as refusal:
+            print(f"comiccleaner: {refusal}", file=err)
+            return EXIT_REFUSED
+        except OSError as exc:
+            print(f"comiccleaner: {exc}", file=err)
+            return EXIT_REFUSED
+        finally:
+            cache.close()
 
     progress = _Progress(err, enabled=not args.quiet)
     try:

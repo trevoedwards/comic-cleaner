@@ -23,13 +23,13 @@ from PySide6.QtWidgets import QApplication, QDialog, QMessageBox  # noqa: E402
 from comiccleaner.core import remover  # noqa: E402
 from comiccleaner.core.archive import is_page_name  # noqa: E402
 from comiccleaner.core.model import Decision, MatchKind  # noqa: E402
-from comiccleaner.gui.ignored import IgnoredDialog  # noqa: E402
 from comiccleaner.gui.main_window import ROLE_GID, MainWindow  # noqa: E402
 from comiccleaner.gui.preview import (  # noqa: E402
     PagePreviewDialog,
     difference_image,
     page_distance,
 )
+from comiccleaner.gui.remembered import RememberedDialog  # noqa: E402
 from comiccleaner.gui.session import SESSION_FILE, load_session  # noqa: E402
 
 from .conftest import make_page, write_archive  # noqa: E402
@@ -236,16 +236,18 @@ def test_an_ignored_group_can_be_brought_back(window, tmp_path):
     hidden = _current_gid(window)
     window._ignore_current()
     assert hidden not in {g.gid for g in window.groups}
-    assert "Ignored Pages" in window.status_label.text()
+    assert "Remembered Pages" in window.status_label.text()
 
-    dialog = IgnoredDialog(window.cache, window.thumbs, window)
+    dialog = RememberedDialog(window.cache, window.thumbs, window, tab="ignored")
     try:
-        assert dialog.listing.count() == 1
-        assert dialog.listing.item(0).text().startswith("3 copies in 3 book(s)")
-        dialog.listing.item(0).setSelected(True)
+        assert dialog.tabs.currentWidget() is dialog.ignored
+        listing = dialog.ignored.listing
+        assert listing.count() == 1
+        assert listing.item(0).text().startswith("3 copies in 3 book(s)")
+        listing.item(0).setSelected(True)
         dialog.restore_selected()
         assert dialog.changed
-        assert dialog.listing.count() == 0
+        assert listing.count() == 0
     finally:
         dialog.done(QDialog.DialogCode.Accepted)
 

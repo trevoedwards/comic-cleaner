@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -43,7 +44,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import APP_NAME, GITHUB_URL
+from .. import APP_NAME, GITHUB_URL, __version__
 from ..core.archive import ARCHIVE_SUFFIXES
 from ..core.cache import HashCache
 from ..core.extern import (
@@ -53,7 +54,7 @@ from ..core.extern import (
     refresh_backends,
     sevenzip_path,
 )
-from ..core.grouping import build_groups, sort_groups, summarise
+from ..core.grouping import build_groups, is_safe, review_warnings, sort_groups, summarise
 from ..core.model import (
     ArchiveInfo,
     ArchiveKind,
@@ -64,17 +65,19 @@ from ..core.model import (
 )
 from ..core.remover import build_plans, is_backup_name
 from ..core.scanner import find_archives
+from ..core.updates import is_newer
 from ..resources import app_icon
 from ..units import human_bytes
 from .about import AboutDialog
-from .ignored import IgnoredDialog
+from .history import HistoryDialog
 from .preview import PagePreviewDialog, page_distance
+from .remembered import RememberedDialog
 from .session import SESSION_FILE, SavedDecision, Session, load_session, save_session
 from .settings import AppSettings, SettingsDialog, cache_path
 from .theme import apply_theme, colour
 from .thumbs import THUMB_SIZE, ThumbnailCache
 from .welcome import WelcomePanel
-from .workers import RemovalWorker, ScanWorker
+from .workers import RemovalWorker, ScanWorker, UpdateChecker
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +94,16 @@ SORT_MODES = [
     ("Space recoverable", "space"),
     ("Number of copies", "count"),
     ("Image size", "size"),
+]
+
+GROUP_FILTERS = [
+    ("All groups", "all"),
+    ("Undecided", "undecided"),
+    ("Marked for removal", "marked"),
+    ("Known junk", "known"),
+    ("Identical", "identical"),
+    ("Similar", "similar"),
+    ("With warnings", "warnings"),
 ]
 
 
@@ -121,6 +134,11 @@ class MainWindow(QMainWindow):
         self._last_backups: list[Path] = []
         # The pages shown in the detail grid, in grid order, for the preview.
         self._shown_pages: list[PageEntry] = []
+        # The groups in the list right now, in row order: self.groups narrowed by
+        # the library selection and the group filter.
+        self._shown_groups: list[DuplicateGroup] = []
+        self._library_selection: set[Path] = set()
+        self._group_filter = "all"
 
         # Kept beside the hash cache, so anything that relocates one moves both.
         self._session_file = db_path.with_name(SESSION_FILE)
@@ -135,6 +153,7 @@ class MainWindow(QMainWindow):
         # Set once the window starts closing. A worker's result can already be
         # queued by then, and must not land on a cache that has been shut.
         self._closing = False
+        self._update_checker: UpdateChecker | None = None
 
         self._build_ui()
         self._restyle()
@@ -182,6 +201,11 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self.status_label, 1)
         self.statusBar().addPermanentWidget(self.progress)
         self.statusBar().addPermanentWidget(self.btn_cancel)
+        # Appears only when an update check finds something newer.
+        self.update_link = QLabel()
+        self.update_link.setOpenExternalLinks(True)
+        self.update_link.setVisible(False)
+        self.statusBar().addPermanentWidget(self.update_link)
 
     def _build_toolbar(self) -> None:
         bar = self.addToolBar("Main")
@@ -205,15 +229,22 @@ class MainWindow(QMainWindow):
         self.act_apply.triggered.connect(self.apply_removals)
         self.act_apply.setEnabled(False)
 
+        self.act_history = QAction("History...", self)
+        self.act_history.setToolTip("Past removals, and putting books back as they were.")
+        self.act_history.triggered.connect(lambda: self.show_history())
+
         self.act_clean_backups = QAction("Clean Up Backups...", self)
         self.act_clean_backups.setToolTip(
             "Delete .bak files left next to your archives by previous runs."
         )
         self.act_clean_backups.triggered.connect(self.clean_up_backups)
 
-        self.act_ignored = QAction("Ignored Pages...", self)
-        self.act_ignored.setToolTip("See the pages you have ignored, and bring any back.")
-        self.act_ignored.triggered.connect(self.manage_ignored)
+        self.act_remembered = QAction("Remembered Pages...", self)
+        self.act_remembered.setToolTip(
+            "Known junk that is removed on sight, and pages you have ignored. "
+            "Forget, restore, import or export them."
+        )
+        self.act_remembered.triggered.connect(lambda: self.manage_remembered())
 
         self.act_settings = QAction("Settings", self)
         self.act_settings.triggered.connect(self.open_settings)
@@ -225,9 +256,10 @@ class MainWindow(QMainWindow):
         bar.addAction(self.act_scan)
         bar.addSeparator()
         bar.addAction(self.act_apply)
+        bar.addAction(self.act_history)
         bar.addAction(self.act_clean_backups)
         bar.addSeparator()
-        bar.addAction(self.act_ignored)
+        bar.addAction(self.act_remembered)
         bar.addAction(self.act_settings)
         bar.addWidget(self._help_button())
 
@@ -240,9 +272,14 @@ class MainWindow(QMainWindow):
         self.act_github.setToolTip(GITHUB_URL)
         self.act_github.triggered.connect(self.open_github)
 
+        self.act_check_updates = QAction("Check for Updates...", self)
+        self.act_check_updates.setToolTip("Ask GitHub whether a newer version is out.")
+        self.act_check_updates.triggered.connect(lambda: self.check_for_updates(quiet=False))
+
         menu = QMenu(self)
         menu.addAction(self.act_about)
         menu.addAction(self.act_github)
+        menu.addAction(self.act_check_updates)
 
         button = QToolButton()
         button.setText("Help")
@@ -323,13 +360,22 @@ class MainWindow(QMainWindow):
             context=Qt.ShortcutContext.WidgetShortcut,
         )
 
+        # Selecting books narrows the groups to the ones they contain.
+        self.archive_list.itemSelectionChanged.connect(self._on_library_selection)
+
+        self.library_search = QLineEdit()
+        self.library_search.setPlaceholderText("Filter books")
+        self.library_search.setClearButtonEnabled(True)
+        self.library_search.setMaximumWidth(170)
+        self.library_search.textChanged.connect(self._apply_library_search)
+
         # Elided rather than wrapped, so the footer height never changes.
         self.library_summary = QLabel("No archives imported.")
         self.library_summary.setWordWrap(False)
 
         return self._panel(
             "Library",
-            None,
+            self.library_search,
             self.archive_list,
             self._row(self.library_summary, stretch_last=True),
         )
@@ -338,26 +384,50 @@ class MainWindow(QMainWindow):
         self.sort_combo = QComboBox()
         for label, key in SORT_MODES:
             self.sort_combo.addItem(label, key)
+        self.sort_combo.setToolTip("Sort the groups")
         self.sort_combo.currentIndexChanged.connect(self._on_sort_changed)
+
+        self.filter_combo = QComboBox()
+        for label, key in GROUP_FILTERS:
+            self.filter_combo.addItem(label, key)
+        self.filter_combo.setToolTip("Show only some of the groups")
+        self.filter_combo.currentIndexChanged.connect(self._on_filter_changed)
+
+        self.btn_show_all = QToolButton()
+        self.btn_show_all.setText("Show all")
+        self.btn_show_all.setToolTip("Clear the book selection and the group filter.")
+        self.btn_show_all.clicked.connect(self.show_all_groups)
+        self.btn_show_all.setVisible(False)
 
         self.group_list = QListWidget()
         self.group_list.setIconSize(QSize(72, 72))
         self.group_list.setAlternatingRowColors(True)
         self.group_list.currentItemChanged.connect(self._on_group_selected)
 
-        self.btn_mark_all = QPushButton("Mark all for removal")
+        self.btn_mark_safe = QPushButton("Mark safe")
+        self.btn_mark_safe.setToolTip(
+            "Mark for removal only what needs no second look: known junk, and pages "
+            "identical across several books with no warnings (no blank pages, covers "
+            "or mid-book matches)."
+        )
+        self.btn_mark_safe.clicked.connect(self.mark_safe_groups)
+        self.btn_mark_all = QPushButton("Mark all")
+        self.btn_mark_all.setToolTip("Mark every group shown for removal.")
         self.btn_mark_all.clicked.connect(lambda: self._set_all_decisions(Decision.DELETE))
         self.btn_clear_all = QPushButton("Clear all")
+        self.btn_clear_all.setToolTip("Clear the decision on every group shown.")
         self.btn_clear_all.clicked.connect(
             lambda: self._set_all_decisions(Decision.UNDECIDED)
         )
 
-        return self._panel(
+        panel = self._panel(
             "Duplicate groups",
-            self._row(QLabel("Sort:"), self.sort_combo),
+            self._row(self.btn_show_all, self.filter_combo, self.sort_combo),
             self.group_list,
-            self._row(self.btn_mark_all, self.btn_clear_all),
+            self._row(self.btn_mark_safe, self.btn_mark_all, self.btn_clear_all),
         )
+        self.groups_title = panel.title_label
+        return panel
 
     def _build_detail_panel(self) -> QWidget:
         # Warnings live in the header so the body keeps a constant top edge.
@@ -390,7 +460,7 @@ class MainWindow(QMainWindow):
         self.btn_ignore = QPushButton("Ignore")
         self.btn_ignore.setShortcut("I")
         self.btn_ignore.setToolTip(
-            "Hide this page from future scans (I). Undo it from Ignored Pages."
+            "Hide this page from future scans (I). Undo it from Remembered Pages."
         )
         self.btn_ignore.clicked.connect(self._ignore_current)
         for button in (self.btn_delete, self.btn_keep, self.btn_ignore):
@@ -635,7 +705,10 @@ class MainWindow(QMainWindow):
         previous = {g.gid: g for g in self.groups}
 
         self.groups = build_groups(
-            scanned, self.settings.grouping(), ignored=self.cache.ignored_hashes()
+            scanned,
+            self.settings.grouping(),
+            ignored=self.cache.ignored_hashes(),
+            known=self.cache.known_hashes() if self.settings.remember_junk else None,
         )
         # Carry over decisions the user already made, this session or the last.
         for group in self.groups:
@@ -645,10 +718,14 @@ class MainWindow(QMainWindow):
             if source is not None:
                 group.decision = source.decision
                 group.kept = {k for k in source.kept if k in {p.key for p in group.pages}}
+            elif group.known:
+                # Removed before, so marked again; Apply still asks first.
+                group.decision = Decision.DELETE
 
         self.groups = sort_groups(self.groups, self._sort_key)
         self._refresh_group_list()
         self._refresh_status()
+        self._update_library_texts()
 
     @Slot(int)
     def _on_sort_changed(self, index: int) -> None:
@@ -657,28 +734,64 @@ class MainWindow(QMainWindow):
         self._refresh_group_list()
 
     # -- view refresh ------------------------------------------------------
+    def _book_stats(self) -> dict[Path, tuple[int, int]]:
+        """Per book: pages in any group, and pages marked for removal."""
+        stats: dict[Path, list[int]] = {}
+        for group in self.groups:
+            removing = {p.key for p in group.pages_to_remove()}
+            for page in group.pages:
+                counts = stats.setdefault(page.archive, [0, 0])
+                counts[0] += 1
+                counts[1] += page.key in removing
+        return {path: (c[0], c[1]) for path, c in stats.items()}
+
+    @staticmethod
+    def _archive_text(info: ArchiveInfo, stats: tuple[int, int] | None) -> str:
+        name = info.path.name
+        if info.error:
+            return f"{name}  —  unreadable"
+        if not info.pages:
+            return f"{name}  —  not scanned"
+        text = f"{name}  —  {info.page_count} pages"
+        if stats:
+            # One count, so the row fits the column; the tooltip has both.
+            repeated, marked = stats
+            text += f", {marked} to remove" if marked else f", {repeated} repeated"
+        return text
+
+    @staticmethod
+    def _archive_tooltip(info: ArchiveInfo, stats: tuple[int, int] | None) -> str:
+        lines = [str(info.path)]
+        if info.error:
+            lines.append(info.error)
+        elif stats:
+            lines.append(f"{stats[0]} page(s) repeated elsewhere, {stats[1]} marked for removal")
+        return "\n".join(lines)
+
     def _refresh_archive_list(self) -> None:
+        # Rebuilt from scratch, so the selection (which filters the groups) is
+        # put back afterwards rather than silently dropped.
+        selected = set(self._library_selection)
+        stats = self._book_stats()
+        self.archive_list.blockSignals(True)
         self.archive_list.clear()
         for path in sorted(self.archives, key=lambda p: str(p).lower()):
             info = self.archives[path]
-            if info.error:
-                text = f"{path.name}  —  unreadable"
-            elif info.pages:
-                text = f"{path.name}  —  {info.page_count} pages"
-            else:
-                text = f"{path.name}  —  not scanned"
-            item = QListWidgetItem(text)
+            item = QListWidgetItem(self._archive_text(info, stats.get(path)))
             item.setData(Qt.ItemDataRole.UserRole, str(path))
-            item.setToolTip(str(path) + (f"\n{info.error}" if info.error else ""))
+            item.setToolTip(self._archive_tooltip(info, stats.get(path)))
             if info.error:
                 item.setForeground(QBrush(QColor("#c0392b")))
             self.archive_list.addItem(item)
+            item.setSelected(path in selected)
+        self.archive_list.blockSignals(False)
+        self._apply_library_search()
 
-        scanned = sum(1 for a in self.archives.values() if a.pages)
-        pages = sum(a.page_count for a in self.archives.values())
-        self.library_summary.setText(
-            f"{len(self.archives)} archive(s), {scanned} scanned, {pages} pages."
-        )
+        still_there = {p for p in selected if p in self.archives}
+        if still_there != self._library_selection:
+            self._library_selection = still_there
+            self._refresh_group_list()
+        self._update_library_summary()
         self.views.setCurrentWidget(self.review if self.archives else self.welcome)
         self._update_tools_banner()
 
@@ -690,9 +803,12 @@ class MainWindow(QMainWindow):
         previous_gid = previous.data(ROLE_GID) if previous is not None else None
         previous_row = self.group_list.currentRow()
 
+        self._shown_groups = [g for g in self.groups if self._group_visible(g)]
+        self._update_groups_title()
+
         self.group_list.blockSignals(True)
         self.group_list.clear()
-        for group in self.groups:
+        for group in self._shown_groups:
             item = QListWidgetItem(self._group_text(group))
             item.setData(ROLE_GID, group.gid)
             representative = group.representative
@@ -701,13 +817,97 @@ class MainWindow(QMainWindow):
             item.setForeground(QBrush(_decision_colour(group.decision)))
             self.group_list.addItem(item)
         self.group_list.blockSignals(False)
-        if not self.groups:
+        if not self._shown_groups:
             self._clear_detail()
             return
-        row = next((i for i, g in enumerate(self.groups) if g.gid == previous_gid), None)
+        row = next(
+            (i for i, g in enumerate(self._shown_groups) if g.gid == previous_gid), None
+        )
         if row is None:
-            row = min(max(previous_row, 0), len(self.groups) - 1)
+            row = min(max(previous_row, 0), len(self._shown_groups) - 1)
         self.group_list.setCurrentRow(row)
+
+    # -- filtering ---------------------------------------------------------
+    def _group_visible(self, group: DuplicateGroup) -> bool:
+        if self._library_selection and not any(
+            p.archive in self._library_selection for p in group.pages
+        ):
+            return False
+        mode = self._group_filter
+        if mode == "undecided":
+            return group.decision is Decision.UNDECIDED
+        if mode == "marked":
+            return group.decision is Decision.DELETE
+        if mode == "known":
+            return group.known
+        if mode == "identical":
+            return group.kind is MatchKind.EXACT
+        if mode == "similar":
+            return group.kind is MatchKind.SIMILAR
+        if mode == "warnings":
+            return bool(review_warnings(group))
+        return True
+
+    def _filtered(self) -> bool:
+        return bool(self._library_selection) or self._group_filter != "all"
+
+    def _update_groups_title(self) -> None:
+        if self._filtered():
+            self.groups_title.setText(
+                f"<b>Groups: {len(self._shown_groups)} of {len(self.groups)}</b>"
+            )
+        else:
+            self.groups_title.setText("<b>Duplicate groups</b>")
+        self.btn_show_all.setVisible(self._filtered())
+
+    def _update_library_summary(self) -> None:
+        if self._library_selection:
+            self.library_summary.setText(
+                f"{len(self._library_selection)} selected: showing their groups only."
+            )
+            return
+        scanned = sum(1 for a in self.archives.values() if a.pages)
+        pages = sum(a.page_count for a in self.archives.values())
+        self.library_summary.setText(
+            f"{len(self.archives)} archive(s), {scanned} scanned, {pages} pages."
+        )
+
+    def _update_library_texts(self) -> None:
+        """Refresh each book's repeat counts in place, keeping the selection."""
+        stats = self._book_stats()
+        for row in range(self.archive_list.count()):
+            item = self.archive_list.item(row)
+            info = self.archives.get(Path(item.data(Qt.ItemDataRole.UserRole)))
+            if info is not None:
+                item.setText(self._archive_text(info, stats.get(info.path)))
+                item.setToolTip(self._archive_tooltip(info, stats.get(info.path)))
+
+    @Slot()
+    def _on_library_selection(self) -> None:
+        self._library_selection = {
+            Path(item.data(Qt.ItemDataRole.UserRole))
+            for item in self.archive_list.selectedItems()
+        }
+        self._update_library_summary()
+        self._refresh_group_list()
+
+    @Slot()
+    def _apply_library_search(self) -> None:
+        needle = self.library_search.text().strip().lower()
+        for row in range(self.archive_list.count()):
+            item = self.archive_list.item(row)
+            item.setHidden(bool(needle) and needle not in item.text().lower())
+
+    @Slot(int)
+    def _on_filter_changed(self, index: int) -> None:
+        self._group_filter = self.filter_combo.itemData(index)
+        self._refresh_group_list()
+
+    @Slot()
+    def show_all_groups(self) -> None:
+        self.archive_list.clearSelection()  # clears the library filter via the signal
+        self.filter_combo.setCurrentIndex(0)
+        self._refresh_group_list()
 
     def _group_text(self, group: DuplicateGroup) -> str:
         marker = {
@@ -717,6 +917,8 @@ class MainWindow(QMainWindow):
             Decision.UNDECIDED: "",
         }[group.decision]
         kind = "identical" if group.kind is MatchKind.EXACT else "similar"
+        if group.known:
+            kind += " • known junk"
         rep = group.representative
         return (
             f"{marker}{group.page_count} copies in {group.archive_count} book(s)\n"
@@ -745,15 +947,10 @@ class MainWindow(QMainWindow):
         self.detail_header.setText(
             f"<b>{group.page_count} copies across {group.archive_count} book(s)</b> — "
             f"{kind}, {human_bytes(group.recoverable_bytes)} recoverable"
+            + (". Known junk: removed from your library before." if group.known else "")
         )
 
-        warnings = []
-        if any(p.flat for p in group.pages):
-            warnings.append("Contains blank or solid-colour pages.")
-        if group.archive_count == 1:
-            warnings.append("All copies are in one book — this may be intentional.")
-        if any(p.index == 0 for p in group.pages):
-            warnings.append("Includes a first page, which is usually the cover.")
+        warnings = review_warnings(group)
         self.detail_warning.setText("  ".join(warnings))
         self.detail_warning.setVisible(bool(warnings))
 
@@ -817,17 +1014,46 @@ class MainWindow(QMainWindow):
         if group is None:
             return
         group.decision = decision
-        self._update_group_item(group)
         self._refresh_status()
         self._session_changed()
-        self._select_next_undecided(self.group_list.currentRow() + 1)
+        self._update_library_texts()
+        row = self.group_list.currentRow()
+        if self._group_visible(group):
+            self._update_group_item(group)
+            self._select_next_undecided(row + 1)
+        else:
+            # Filtered out by its new decision ("Undecided" view, say): drop it,
+            # and whatever slides into its row is where the search starts.
+            self._refresh_group_list()
+            self._select_next_undecided(self.group_list.currentRow())
 
     def _set_all_decisions(self, decision: Decision) -> None:
-        for group in self.groups:
+        """Apply `decision` to every group shown; filtered-out groups are left be."""
+        for group in self._shown_groups:
             group.decision = decision
         self._refresh_group_list()
         self._refresh_status()
         self._session_changed()
+        self._update_library_texts()
+
+    @Slot()
+    def mark_safe_groups(self) -> None:
+        """Mark what needs no second look; leave the rest for review."""
+        safe = [
+            g for g in self._shown_groups
+            if g.decision is Decision.UNDECIDED and is_safe(g, self.settings.min_archives)
+        ]
+        for group in safe:
+            group.decision = Decision.DELETE
+        left = sum(1 for g in self._shown_groups if g.decision is Decision.UNDECIDED)
+        self._refresh_group_list()
+        self._refresh_status()
+        self._session_changed()
+        self._update_library_texts()
+        self.status_label.setText(
+            f"Marked {len(safe)} safe group(s) for removal. "
+            + (f"{left} still need a look." if left else "Nothing is left undecided.")
+        )
 
     def _ignore_current(self) -> None:
         group = self._current_group()
@@ -848,14 +1074,14 @@ class MainWindow(QMainWindow):
         if self.groups:
             self._select_next_undecided(self.group_list.currentRow())
         self.status_label.setText(
-            "Ignored. Bring it back any time from Ignored Pages on the toolbar."
+            "Ignored. Bring it back any time from Remembered Pages on the toolbar."
         )
 
     def _select_next_undecided(self, start: int) -> None:
         """Move to the first undecided group at or after `start`, wrapping round."""
-        count = len(self.groups)
+        count = len(self._shown_groups)
         for row in [*range(start, count), *range(0, min(start, count))]:
-            if self.groups[row].decision is Decision.UNDECIDED:
+            if self._shown_groups[row].decision is Decision.UNDECIDED:
                 self.group_list.setCurrentRow(row)
                 return
         if count:
@@ -885,9 +1111,8 @@ class MainWindow(QMainWindow):
         self._refresh_status()
         self._session_changed()
 
-    @Slot()
-    def manage_ignored(self) -> None:
-        dialog = IgnoredDialog(self.cache, self.thumbs, self)
+    def manage_remembered(self, *, tab: str = "known") -> None:
+        dialog = RememberedDialog(self.cache, self.thumbs, self, tab=tab)
         dialog.exec()
         if dialog.changed:
             self.rebuild_groups()
@@ -962,6 +1187,8 @@ class MainWindow(QMainWindow):
             output_dir=self.settings.output_path(),
             dry_run=dialog.dry_run(),
             compress=self.settings.compress,
+            learn=marked if self.settings.remember_junk else None,
+            cache=self.cache,
             parent=self,
         )
         worker.progressed.connect(self._on_removal_progress)
@@ -1016,6 +1243,12 @@ class MainWindow(QMainWindow):
             f"Removed {report.total_removed} page(s) from {len(succeeded)} archive(s).",
             f"Freed {human_bytes(report.total_freed)}.",
         ]
+        learned = self._removal_worker.learned if self._removal_worker is not None else 0
+        if learned:
+            lines.append(
+                f"{learned} page(s) remembered as known junk: they will be marked for "
+                "removal wherever they turn up again."
+            )
         if converted:
             lines.append(
                 f"{len(converted)} .cbr/.cb7 file(s) were rebuilt as .cbz "
@@ -1147,6 +1380,38 @@ class MainWindow(QMainWindow):
         self._last_backups = [b for b in backups if b.exists()]
         return removed, freed
 
+    def show_history(self) -> None:
+        if self._scan_worker is not None or self._removal_worker is not None:
+            return
+        # Restoring replaces files, which Windows refuses while a thumbnail holds one open.
+        self.thumbs.release_archives()
+        dialog = HistoryDialog(self.cache, self)
+        dialog.exec()
+        if dialog.restored:
+            self._after_restore(dialog.restored)
+
+    def _after_restore(self, items: list) -> None:
+        """Bring the library in line with books that were just put back."""
+        rescan: list[Path] = []
+        for item in items:
+            listed = item.archive in self.archives or item.output in self.archives
+            self.thumbs.invalidate(item.archive)
+            if item.output != item.archive:
+                # A cbr rebuilt as cbz: the cbz is gone and the cbr is back.
+                self.archives.pop(item.output, None)
+                self.thumbs.invalidate(item.output)
+            if listed:
+                self.archives[item.archive] = ArchiveInfo(
+                    path=item.archive, kind=_kind_of(item.archive), size=0, mtime_ns=0
+                )
+                rescan.append(item.archive)
+        self._refresh_archive_list()
+        self.rebuild_groups()
+        self._session_changed()
+        self.status_label.setText(f"Restored {len(items)} book(s).")
+        if rescan:
+            self._run_scan(rescan)
+
     @Slot()
     def clean_up_backups(self) -> None:
         """Find and offer to delete .bak files left next to imported archives."""
@@ -1225,6 +1490,56 @@ class MainWindow(QMainWindow):
             self.import_paths(paths)
         if restored:
             self.start_scan()
+        if self.settings.check_updates:
+            self.check_for_updates(quiet=True)
+
+    # -- updates -----------------------------------------------------------
+    def check_for_updates(self, *, quiet: bool) -> None:
+        """Ask GitHub for the latest release. Quietly, only a newer one is mentioned."""
+        if self._update_checker is not None:
+            return
+        checker = UpdateChecker(self)
+        checker.finished.connect(
+            lambda release, error: self._on_update_result(release, error, quiet)
+        )
+        self._update_checker = checker
+        if not quiet:
+            self.status_label.setText("Checking for updates...")
+        checker.start()
+
+    def _on_update_result(self, release: object, error: str, quiet: bool) -> None:
+        self._update_checker = None
+        if self._closing:
+            return
+        if release is not None and is_newer(release.version):
+            self.update_link.setText(
+                f'<a href="{release.url}">Version {release.version} is available</a>'
+            )
+            self.update_link.setVisible(True)
+            if not quiet:
+                box = QMessageBox(self)
+                box.setWindowTitle("Update available")
+                box.setText(
+                    f"{APP_NAME} {release.version} is available; this is "
+                    f"{__version__}."
+                )
+                open_page = box.addButton("Open Download Page", QMessageBox.ButtonRole.AcceptRole)
+                box.addButton(QMessageBox.StandardButton.Close)
+                box.exec()
+                if box.clickedButton() is open_page:
+                    QDesktopServices.openUrl(QUrl(release.url))
+            return
+        if quiet:
+            return  # a failed or unnecessary background check is not worth a word
+        if error:
+            QMessageBox.warning(
+                self, "Could not check for updates", error[:1].upper() + error[1:] + "."
+            )
+        else:
+            QMessageBox.information(
+                self, "No update", f"You have the latest version, {__version__}."
+            )
+        self._refresh_status()
 
     def _restore_session(self) -> int:
         session = load_session(self._session_file)
@@ -1327,7 +1642,9 @@ class MainWindow(QMainWindow):
             self.act_apply,
             self.act_clean_backups,
             # Its thumbnails open archives, which must stay closed during a removal.
-            self.act_ignored,
+            self.act_remembered,
+            # Restoring moves the very files a scan or removal is working on.
+            self.act_history,
             self.act_settings,
         ):
             action.setEnabled(not busy)

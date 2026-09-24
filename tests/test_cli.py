@@ -379,3 +379,164 @@ def test_the_cli_shares_the_guis_data_folder():
     from comiccleaner.gui.settings import data_dir
 
     assert paths.data_dir() == data_dir()
+
+
+# -- known junk ------------------------------------------------------------
+
+
+def _incoming(tmp_path: Path, ad_page: bytes) -> Path:
+    folder = tmp_path / "incoming"
+    # Five pages, so losing the advert stays inside the default --max-fraction.
+    story = [make_page(seed=400 + i) for i in range(4)]
+    write_archive(folder / "Book 04.cbz", [story[0], ad_page, *story[1:]])
+    return folder
+
+
+def test_a_clean_is_remembered_and_catches_the_advert_in_a_new_book(
+    library, cache_file, tmp_path, ad_page
+):
+    code, out, _ = run("clean", str(library), "--cache", cache_file, "--all", "--yes")
+    assert code == cli.EXIT_OK
+    assert "Remembered 1 new page(s) as known junk." in out
+
+    incoming = _incoming(tmp_path, ad_page)
+    _, listing, _ = run("scan", str(incoming), "--cache", cache_file, "--json")
+    [group] = json.loads(listing)["groups"]
+    assert group["known"] is True
+    assert group["copies"] == 1  # one book, yet found
+
+    code, _, _ = run("clean", str(incoming), "--cache", cache_file, "--known", "--yes")
+    assert code == cli.EXIT_OK
+    assert _pages(incoming / "Book 04.cbz") == 4
+
+
+def test_known_groups_are_starred_in_the_table(library, cache_file, tmp_path, ad_page):
+    run("clean", str(library), "--cache", cache_file, "--all", "--yes")
+
+    _, out, _ = run("scan", str(_incoming(tmp_path, ad_page)), "--cache", cache_file)
+
+    assert "identical*" in out
+    assert "* known junk" in out
+
+
+def test_clean_known_leaves_new_repeats_alone(library, cache_file):
+    """--known only acts on what was removed before, never on a fresh match."""
+    code, out, _ = run("clean", str(library), "--cache", cache_file, "--known", "--yes")
+
+    assert code == cli.EXIT_OK
+    assert "Nothing to remove." in out
+    assert _counts(library) == ORIGINAL
+
+
+def test_no_remember_learns_nothing(library, cache_file):
+    run("clean", str(library), "--cache", cache_file, "--all", "--yes", "--no-remember")
+
+    code, out, _ = run("known", "--cache", cache_file, "list")
+    assert code == cli.EXIT_OK
+    assert "Nothing is remembered yet" in out
+
+
+def test_a_dry_run_learns_nothing(library, cache_file):
+    run("clean", str(library), "--cache", cache_file, "--all", "--dry-run")
+
+    _, out, _ = run("known", "--cache", cache_file, "list", "--json")
+    assert json.loads(out)["known"] == []
+
+
+def test_no_known_leaves_the_list_out(library, cache_file, tmp_path, ad_page):
+    run("clean", str(library), "--cache", cache_file, "--all", "--yes")
+
+    _, out, _ = run(
+        "scan", str(_incoming(tmp_path, ad_page)), "--cache", cache_file, "--json", "--no-known"
+    )
+
+    assert json.loads(out)["groups"] == []
+
+
+def test_known_list_export_import_and_forget(library, cache_file, tmp_path):
+    run("clean", str(library), "--cache", cache_file, "--all", "--yes")
+    exported = tmp_path / "junk.json"
+    other = str(tmp_path / "other.sqlite")
+
+    _, listing, _ = run("known", "--cache", cache_file, "list", "--json")
+    [entry] = json.loads(listing)["known"]
+    assert entry["source"] == "removed"
+
+    code, out, _ = run("known", "--cache", cache_file, "export", str(exported))
+    assert code == cli.EXIT_OK and "Wrote 1" in out
+
+    code, out, _ = run("known", "--cache", other, "import", str(exported))
+    assert code == cli.EXIT_OK and "Added 1" in out
+    code, out, _ = run("known", "--cache", other, "import", str(exported))
+    assert "1 were already known" in out
+
+    code, out, _ = run("known", "--cache", other, "forget", entry["id"][:6])
+    assert code == cli.EXIT_OK and f"Forgot {entry['id']}" in out
+    _, listing, _ = run("known", "--cache", other, "list", "--json")
+    assert json.loads(listing)["known"] == []
+
+
+def test_a_bad_known_list_is_refused(cache_file, tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"format": "nope"}', encoding="utf-8")
+
+    code, _, err = run("known", "--cache", cache_file, "import", str(bad))
+
+    assert code == cli.EXIT_REFUSED
+    assert "Nothing was imported" in err
+
+
+def test_forgetting_an_unknown_id_is_refused(cache_file):
+    code, _, err = run("known", "--cache", cache_file, "forget", "abc")
+
+    assert code == cli.EXIT_REFUSED
+    assert "No remembered page 'abc'" in err
+
+
+def test_the_entry_point_routes_known_to_the_cli(cache_file, capsys):
+    from comiccleaner.__main__ import main
+
+    assert main(["known", "--cache", cache_file, "list"]) == cli.EXIT_OK
+    assert "Nothing is remembered yet" in capsys.readouterr().out
+
+
+# -- position --------------------------------------------------------------
+
+
+def _ad_mid_and_at_end(root: Path) -> Path:
+    """One book has the advert at the back, the other buries it mid-book."""
+    ad = make_page(seed=7777)
+    story = [make_page(seed=500 + i) for i in range(9)]
+    write_archive(root / "Back.cbz", [*story, ad])
+    other = [make_page(seed=600 + i) for i in range(9)]
+    write_archive(root / "Middle.cbz", [*other[:5], ad, *other[5:]])
+    return root
+
+
+def test_edges_leaves_mid_book_copies_alone(tmp_path, cache_file):
+    library = _ad_mid_and_at_end(tmp_path / "lib")
+
+    code, out, err = run(
+        "clean", str(library), "--cache", cache_file, "--all", "--yes", "--edges", "3", "--json"
+    )
+
+    assert code == cli.EXIT_OK
+    assert json.loads(out)["spared_mid_book"] == 1
+    assert "Leaving 1 copy" in err
+    assert _counts(library) == {"Back.cbz": 9, "Middle.cbz": 10}
+
+
+def test_scan_json_reports_position_and_warnings(tmp_path, cache_file):
+    library = _ad_mid_and_at_end(tmp_path / "lib")
+
+    _, out, _ = run("scan", str(library), "--cache", cache_file, "--json")
+    [group] = json.loads(out)["groups"]
+
+    assert group["edge_share"] == 0.5
+    assert group["warnings"] == []  # one copy sits where junk sits, so no mid-book flag
+
+
+def test_edges_must_be_positive(library, cache_file):
+    with pytest.raises(SystemExit) as exited:
+        run("clean", str(library), "--cache", cache_file, "--all", "--edges", "0")
+    assert exited.value.code == 2
