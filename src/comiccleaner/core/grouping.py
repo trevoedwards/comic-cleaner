@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 
 import numpy as np
@@ -126,6 +126,24 @@ def _cluster_by_distance(hashes: np.ndarray, threshold: int) -> list[list[int]]:
     return list(buckets.values())
 
 
+def _near_ignored(hashes: np.ndarray, ignored: np.ndarray, threshold: int) -> np.ndarray:
+    """Mask of `hashes` lying within `threshold` of any ignored hash.
+
+    Matching at the current threshold, not exactly, is what lets an ignore made at
+    one setting hold at another: loosen the threshold and re-encoded variants of
+    the ignored page stay hidden too, rather than resurfacing as a "new" group.
+    """
+    mask = np.zeros(len(hashes), dtype=bool)
+    if len(hashes) == 0 or len(ignored) == 0:
+        return mask
+    chunk = max(1, _CHUNK_BUDGET_BYTES // max(1, len(ignored) * 8))
+    for start in range(0, len(hashes), chunk):
+        stop = min(start + chunk, len(hashes))
+        dist = hamming_matrix(hashes[start:stop], ignored)
+        mask[start:stop] = (dist <= threshold).any(axis=1)
+    return mask
+
+
 def collect_pages(
     archives: Iterable[ArchiveInfo], options: GroupingOptions
 ) -> list[PageEntry]:
@@ -151,11 +169,15 @@ def collect_pages(
 def build_groups(
     archives: Iterable[ArchiveInfo],
     options: GroupingOptions | None = None,
-    ignored: set[str] | None = None,
+    ignored: Collection[int] | None = None,
 ) -> list[DuplicateGroup]:
-    """Cluster pages into duplicate groups, best candidates first."""
+    """Cluster pages into duplicate groups, best candidates first.
+
+    `ignored` holds perceptual hashes the user has said are not junk. Pages near
+    any of them are dropped before clustering, so they neither show up nor chain
+    unrelated pages together.
+    """
     opts = options or GroupingOptions()
-    ignored = ignored or set()
 
     pages = collect_pages(archives, opts)
     if not pages:
@@ -168,6 +190,9 @@ def build_groups(
         by_hash[page.dhash].append(page)
 
     unique = np.array(sorted(by_hash), dtype=np.uint64)
+    if ignored:
+        masked = np.array(sorted(ignored), dtype=np.uint64)
+        unique = unique[~_near_ignored(unique, masked, opts.threshold)]
     clusters = _cluster_by_distance(unique, opts.threshold)
 
     groups: list[DuplicateGroup] = []
@@ -183,9 +208,6 @@ def build_groups(
         distinct_content = {p.content_sha for p in members}
         kind = MatchKind.EXACT if len(distinct_content) == 1 else MatchKind.SIMILAR
         gid = group_id(members)
-        if gid in ignored:
-            continue
-
         members.sort(key=lambda p: (str(p.archive).lower(), p.index))
         groups.append(DuplicateGroup(gid=gid, kind=kind, pages=members))
 
@@ -194,7 +216,7 @@ def build_groups(
 
 
 def group_id(members: list[PageEntry]) -> str:
-    """Stable id for a group, so ignore decisions survive a rescan.
+    """Stable id for a group, so review decisions survive a regroup or rescan.
 
     Derived from the lowest dhash in the cluster: adding or removing a book that
     contains the same ad does not change it.

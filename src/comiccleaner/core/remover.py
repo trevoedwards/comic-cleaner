@@ -83,6 +83,8 @@ class RemovalResult:
 @dataclass(slots=True)
 class RemovalReport:
     results: list[RemovalResult] = field(default_factory=list)
+    # Stopped early at the user's request; plans after the last result never ran.
+    cancelled: bool = False
 
     @property
     def succeeded(self) -> list[RemovalResult]:
@@ -420,6 +422,7 @@ def apply_removals(
     mirror_root = _common_parent(todo) if output_dir is not None else None
     for done, plan in enumerate(todo, start=1):
         if should_cancel is not None and should_cancel():
+            report.cancelled = True
             break
         plan_output = output_dir
         if output_dir is not None and mirror_root is not None:

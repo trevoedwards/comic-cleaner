@@ -171,9 +171,78 @@ def test_skip_first_page_protects_covers(tmp_path: Path) -> None:
 def test_ignored_groups_are_hidden(library: Path) -> None:
     archives = scan_archives(find_archives([library]))
     groups = build_groups(archives, GroupingOptions(threshold=8))
-    gid = groups[0].gid
+    hashes = {p.dhash for p in groups[0].pages}
 
-    assert build_groups(archives, GroupingOptions(threshold=8), ignored={gid}) == []
+    assert build_groups(archives, GroupingOptions(threshold=8), ignored=hashes) == []
+
+
+def test_an_ignore_holds_when_the_threshold_changes(library: Path) -> None:
+    """Ignoring at one threshold must not let parts of the group back at another."""
+    archives = scan_archives(find_archives([library]))
+    loose = build_groups(archives, GroupingOptions(threshold=8))[0]
+    hashes = {p.dhash for p in loose.pages}
+
+    # Tighter: the cluster splits, and every piece of it is still hidden.
+    assert build_groups(archives, GroupingOptions(threshold=0), ignored=hashes) == []
+
+    # Looser, from an ignore made at 0: the re-encoded copy stays hidden too.
+    exact = build_groups(archives, GroupingOptions(threshold=0))[0]
+    exact_hashes = {p.dhash for p in exact.pages}
+    assert build_groups(archives, GroupingOptions(threshold=8), ignored=exact_hashes) == []
+
+
+def test_ignoring_one_page_leaves_unrelated_groups_alone(tmp_path: Path) -> None:
+    ads = [make_page(seed=9000 + i) for i in range(2)]
+    for number in range(2):
+        write_archive(tmp_path / f"B{number}.cbz", [make_page(seed=number), *ads])
+    archives = scan_archives(find_archives([tmp_path]))
+    groups = build_groups(archives, GroupingOptions(threshold=4))
+    assert len(groups) == 2
+
+    hidden = {p.dhash for p in groups[0].pages}
+    remaining = build_groups(archives, GroupingOptions(threshold=4), ignored=hidden)
+
+    assert [g.gid for g in remaining] == [groups[1].gid]
+
+
+def test_ignore_list_round_trips_through_the_cache(tmp_path: Path) -> None:
+    cache = HashCache(tmp_path / "cache.sqlite")
+    cache.ignore("00ff", {0xFF, 0x1FF}, note="2 copies", sample=(tmp_path / "a.cbz", "p1.jpg"))
+    cache.ignore("f000000000000000", {0xF000000000000000})  # needs the full uint64 range
+
+    assert cache.ignored_hashes() == {0xFF, 0x1FF, 0xF000000000000000}
+    entries = {e.gid: e for e in cache.ignored_entries()}
+    assert entries["00ff"].note == "2 copies"
+    assert entries["00ff"].sample_path == tmp_path / "a.cbz"
+    assert entries["00ff"].sample_name == "p1.jpg"
+
+    cache.unignore("00ff")
+    assert cache.ignored_hashes() == {0xF000000000000000}
+    cache.clear_ignored()
+    assert cache.ignored_hashes() == set()
+    assert cache.ignored_entries() == []
+    cache.close()
+
+
+def test_ignores_from_an_older_database_still_apply(tmp_path: Path) -> None:
+    """Before hashes were stored, an ignore was just its group id."""
+    import sqlite3
+
+    db = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE ignored (gid TEXT PRIMARY KEY, note TEXT, "
+        "created_at REAL NOT NULL DEFAULT (strftime('%s','now')));"
+        "INSERT INTO ignored(gid, note) VALUES ('00000000000000ab', '');"
+    )
+    conn.commit()
+    conn.close()
+
+    cache = HashCache(db)
+    assert cache.ignored_hashes() == {0xAB}
+    [entry] = cache.ignored_entries()
+    assert entry.sample_path is None
+    cache.close()
 
 
 def test_group_id_is_stable_across_library_size(library: Path, tmp_path: Path) -> None:

@@ -63,8 +63,7 @@ def main(argv: list[str] | None = None) -> int:
 
     window = MainWindow()
     window.show()
-    if args.paths:
-        window.import_paths(args.paths)
+    window.open_startup(args.paths)
     return app.exec()
 
 

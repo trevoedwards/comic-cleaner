@@ -78,6 +78,8 @@ def apply_and_wait(window: MainWindow, monkeypatch, *, dry_run: bool = False) ->
 
     window.apply_removals()
     assert pump_until(lambda: window._removal_worker is None), "removal did not finish"
+    # The rewritten books are rescanned straight afterwards.
+    assert pump_until(lambda: window._scan_worker is None), "rescan did not finish"
 
 
 # -- tests -----------------------------------------------------------------
@@ -164,15 +166,11 @@ def test_finished_removal_does_not_leave_stale_groups_to_reapply(window, library
 
     apply_and_wait(window, monkeypatch)
 
-    # The books were rewritten, so what was hashed no longer exists.
-    assert window.groups == []
-    assert not window.act_apply.isEnabled()
-    assert all(info.page_count == 0 for info in window.archives.values())
-
-    # A rescan sees the cleaned books, and nothing is left to remove.
-    scan_and_wait(window)
+    # The rewritten books were rescanned on their own: what is on screen is what
+    # is on disk now, and nothing is left to remove.
     assert all(info.page_count == 4 for info in window.archives.values())
     assert window.groups == []
+    assert not window.act_apply.isEnabled()
 
 
 def test_dry_run_leaves_files_alone(window, library, monkeypatch):

@@ -6,9 +6,12 @@ against (path, size, mtime). Touching an archive invalidates only that archive.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sqlite3
 import threading
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 from .model import PageEntry
@@ -43,7 +46,29 @@ CREATE TABLE IF NOT EXISTS ignored (
     note       TEXT,
     created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
 );
+-- Every perceptual hash in an ignored group. Rows from before this table existed
+-- have none, and fall back to their gid, which is the group's lowest hash.
+CREATE TABLE IF NOT EXISTS ignored_hashes (
+    gid   TEXT NOT NULL,
+    dhash INTEGER NOT NULL,
+    PRIMARY KEY (gid, dhash)
+);
 """
+
+# Columns added to `ignored` after it first shipped, so the manager can show a
+# thumbnail of what was hidden. Added on open to databases that predate them.
+_IGNORED_COLUMNS = {"sample_path": "TEXT", "sample_name": "TEXT"}
+
+
+@dataclass(slots=True)
+class IgnoredEntry:
+    """One "ignore" action, as listed in the manager."""
+
+    gid: str
+    note: str
+    created_at: float
+    sample_path: Path | None
+    sample_name: str | None
 
 
 _SIGN_BIT = 1 << 63
@@ -73,7 +98,14 @@ class HashCache:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        present = {row[1] for row in self.conn.execute("PRAGMA table_info(ignored)")}
+        for column, kind in _IGNORED_COLUMNS.items():
+            if column not in present:
+                self.conn.execute(f"ALTER TABLE ignored ADD COLUMN {column} {kind}")
 
     def close(self) -> None:
         with self._lock:
@@ -142,20 +174,65 @@ class HashCache:
             self.conn.execute("DELETE FROM pages WHERE path = ?", (key,))
 
     # -- ignore list -------------------------------------------------------
-    def ignored_gids(self) -> set[str]:
+    def ignored_hashes(self) -> set[int]:
+        """Every perceptual hash the user has asked never to see again."""
         with self._lock:
-            return {r[0] for r in self.conn.execute("SELECT gid FROM ignored")}
+            hashes = {
+                _to_unsigned(r[0])
+                for r in self.conn.execute("SELECT dhash FROM ignored_hashes")
+            }
+            for (gid,) in self.conn.execute(
+                "SELECT gid FROM ignored WHERE gid NOT IN (SELECT gid FROM ignored_hashes)"
+            ):
+                with contextlib.suppress(ValueError):
+                    hashes.add(int(gid, 16))
+        return hashes
 
-    def ignore(self, gid: str, note: str = "") -> None:
+    def ignored_entries(self) -> list[IgnoredEntry]:
+        """Ignore actions, most recent first."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT gid, note, created_at, sample_path, sample_name FROM ignored "
+                "ORDER BY created_at DESC, gid"
+            ).fetchall()
+        return [
+            IgnoredEntry(
+                gid=r[0],
+                note=r[1] or "",
+                created_at=float(r[2]),
+                sample_path=Path(r[3]) if r[3] else None,
+                sample_name=r[4],
+            )
+            for r in rows
+        ]
+
+    def ignore(
+        self,
+        gid: str,
+        hashes: Iterable[int] = (),
+        *,
+        note: str = "",
+        sample: tuple[Path, str] | None = None,
+    ) -> None:
+        sample_path, sample_name = (str(sample[0]), sample[1]) if sample else (None, None)
         with self._lock, self.conn:
+            self.conn.execute("DELETE FROM ignored_hashes WHERE gid = ?", (gid,))
             self.conn.execute(
-                "INSERT OR REPLACE INTO ignored(gid, note) VALUES (?, ?)", (gid, note)
+                "INSERT OR REPLACE INTO ignored(gid, note, sample_path, sample_name) "
+                "VALUES (?, ?, ?, ?)",
+                (gid, note, sample_path, sample_name),
+            )
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO ignored_hashes(gid, dhash) VALUES (?, ?)",
+                [(gid, _to_signed(h)) for h in set(hashes)],
             )
 
     def unignore(self, gid: str) -> None:
         with self._lock, self.conn:
             self.conn.execute("DELETE FROM ignored WHERE gid = ?", (gid,))
+            self.conn.execute("DELETE FROM ignored_hashes WHERE gid = ?", (gid,))
 
     def clear_ignored(self) -> None:
         with self._lock, self.conn:
             self.conn.execute("DELETE FROM ignored")
+            self.conn.execute("DELETE FROM ignored_hashes")

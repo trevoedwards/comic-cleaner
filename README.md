@@ -53,11 +53,36 @@ python -m comiccleaner "/path/to/comics"        # paths are optional
 2. **Scan** — pages are decoded and hashed, then cached against each file's size
    and mtime, so re-scanning an unchanged library is instant.
 3. **Review** — groups are ranked by how many books they affect. All copies are
-   ticked for removal; untick any you want to keep.
+   ticked for removal; untick any you want to keep. Double-click a page to see it
+   full size.
 4. **Apply** — a confirmation dialog spells out every change, with a dry run.
+   The books that were rewritten are rescanned automatically afterwards.
 
 > [!TIP]
 > Changing a matching setting re-groups instantly — it does not re-scan.
+
+The library and your review decisions are saved as you go, so closing the app
+mid-review loses nothing: next launch reopens the same books and rescans them,
+which is instant for any book the hash cache already knows.
+
+### Reviewing from the keyboard
+
+| Key | Does |
+|---|---|
+| <kbd>D</kbd> | Remove the ticked copies of this group, then go to the next undecided group |
+| <kbd>K</kbd> | Keep this group, then go to the next undecided group |
+| <kbd>I</kbd> | Ignore this page from now on (undo it from **Ignored Pages…**) |
+| <kbd>Space</kbd> | Tick or untick the selected copy |
+| <kbd>Enter</kbd> | Open the selected copy full size |
+| <kbd>Delete</kbd> | In the library, remove the selected books from the list (not from disk) |
+| <kbd>Ctrl</kbd>+<kbd>O</kbd> / <kbd>Ctrl</kbd>+<kbd>R</kbd> | Add files / scan |
+
+In the full-size preview, <kbd>←</kbd> <kbd>→</kbd> step through the copies,
+<kbd>Space</kbd> ticks or unticks the one on screen, and for **similar** groups
+<kbd>H</kbd> paints whatever differs from the reference image in red. That is
+how you spot an advert whose issue number or date changes from book to book.
+Similar groups list the copies furthest from the reference first, so any page
+that single-linkage chained in shows up at the start, not buried.
 
 ## How matching works
 
@@ -81,11 +106,18 @@ matches brute force. 50,000 pages at threshold 6: ~1.3 s instead of ~102 s.
 > together even when A and C are further apart than the threshold. Hence the
 > default of 0, and why loose values deserve a look before you bulk delete.
 
+**Ignore** remembers every hash in the group, and hides any page within the
+current threshold of one of them. An ignore made at similarity 6 therefore
+still holds at 0, and one made at 0 also hides re-encoded copies once you
+loosen the setting. **Ignored Pages…** on the toolbar lists everything
+ignored, with a thumbnail, and brings any of it back.
+
 ## Settings
 
 | Setting | Default | Notes |
 |---|---|---|
 | **Theme** | Follow system | Light, dark or the OS setting, previewed live. |
+| **Reopen the last library** | on | Brings back the books and review decisions from last time. Turning it off also deletes the saved session. |
 | **Similarity** | 0 | Hamming distance. `0` = identical only, `2`–`6` catches re-encodes, above ~`10` expect false matches. |
 | **Minimum copies** | 2 | Occurrences before a group is shown. |
 | **Across at least (books)** | 2 | Ads repeat across books. `1` also catches a page repeated within one book. |

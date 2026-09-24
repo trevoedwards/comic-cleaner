@@ -51,6 +51,7 @@ class AppSettings:
     output_dir: str = ""
     compress: bool = False
     theme: str = "system"
+    restore_session: bool = True
 
     def grouping(self) -> GroupingOptions:
         return GroupingOptions(
@@ -108,6 +109,9 @@ class AppSettings:
             output_dir=str(store.value("output_dir", defaults.output_dir)),
             compress=_as_bool(store.value("compress", defaults.compress)),
             theme=str(store.value("theme", defaults.theme)),
+            restore_session=_as_bool(
+                store.value("restore_session", defaults.restore_session)
+            ),
         )
 
     def save(self) -> None:
@@ -197,7 +201,7 @@ class SettingsDialog(QDialog):
         self._settings = settings
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self._appearance_box(settings))
+        layout.addWidget(self._general_box(settings))
         layout.addWidget(self._matching_box(settings))
         layout.addWidget(self._safety_box(settings))
         layout.addWidget(self._backends_box())
@@ -209,8 +213,8 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def _appearance_box(self, settings: AppSettings) -> QGroupBox:
-        box = QGroupBox("Appearance")
+    def _general_box(self, settings: AppSettings) -> QGroupBox:
+        box = QGroupBox("General")
         form = QFormLayout(box)
 
         self.theme = QComboBox()
@@ -221,6 +225,13 @@ class SettingsDialog(QDialog):
         # Applies straight away so the choice can be judged before committing.
         self.theme.currentIndexChanged.connect(self._preview_theme)
         form.addRow("Theme:", self.theme)
+
+        self.restore_session = QCheckBox("Reopen the last library and its review on startup")
+        self.restore_session.setChecked(settings.restore_session)
+        self.restore_session.setToolTip(
+            "Unchanged books come back from the hash cache, so this costs almost nothing."
+        )
+        form.addRow(self.restore_session)
         return box
 
     def _preview_theme(self, index: int) -> None:
@@ -348,4 +359,5 @@ class SettingsDialog(QDialog):
             output_dir=self.output_dir.value(),
             compress=self.compress.isChecked(),
             theme=str(self.theme.currentData()),
+            restore_session=self.restore_session.isChecked(),
         )

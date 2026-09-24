@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import logging
 from collections import OrderedDict
 from pathlib import Path
 
+from PIL import Image
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
 from PySide6.QtGui import QIcon, QPixmap
 
@@ -49,7 +51,8 @@ class ArchivePool:
 
 
 class _ThumbSignals(QObject):
-    ready = Signal(str, QPixmap)
+    # PNG bytes, not a QPixmap: pixmaps may only be made on the UI thread.
+    ready = Signal(str, bytes)
     failed = Signal(str, str)
 
 
@@ -71,17 +74,40 @@ class _ThumbJob(QRunnable):
         except Exception as exc:  # Pillow can raise almost anything on bad scans
             self.signals.failed.emit(self._key, str(exc))
             return
-        pixmap = QPixmap()
-        if not pixmap.loadFromData(png, "PNG"):
-            self.signals.failed.emit(self._key, "could not decode thumbnail")
-            return
-        self.signals.ready.emit(self._key, pixmap)
+        self.signals.ready.emit(self._key, png)
+
+
+class _PageSignals(QObject):
+    # key, the decoded RGB image (or None), and an error message when it failed.
+    done = Signal(str, object, str)
+
+
+class _PageJob(QRunnable):
+    """Decodes one page at full size for the preview window."""
+
+    def __init__(self, pool: ArchivePool, key: str, page: PageEntry) -> None:
+        super().__init__()
+        self.signals = _PageSignals()
+        self._pool = pool
+        self._key = key
+        self._page = page
+
+    def run(self) -> None:  # executed on a pool thread
+        try:
+            data = self._pool.read(self._page.archive, self._page.name)
+            image = Image.open(io.BytesIO(data))
+            image.load()
+            # A PIL image rather than a QPixmap: pixmaps belong to the UI thread.
+            self.signals.done.emit(self._key, image.convert("RGB"), "")
+        except Exception as exc:  # Pillow can raise almost anything on bad scans
+            self.signals.done.emit(self._key, None, str(exc))
 
 
 class ThumbnailCache(QObject):
     """Requests thumbnails off the UI thread and caches the results."""
 
     ready = Signal(str, QPixmap)
+    page_loaded = Signal(str, object, str)
 
     def __init__(self, parent: QObject | None = None, capacity: int = 600) -> None:
         super().__init__(parent)
@@ -117,7 +143,27 @@ class ThumbnailCache(QObject):
     def icon(self, page: PageEntry) -> QIcon:
         return QIcon(self.get(page))
 
-    def _on_ready(self, key: str, pixmap: QPixmap) -> None:
+    def request_page(self, page: PageEntry) -> None:
+        """Decode a page at full size; the answer arrives through page_loaded.
+
+        Shares the thumbnail thread and its open archives, so a cbr that was just
+        extracted for the grid is not extracted all over again.
+        """
+        job = _PageJob(self._pool, self.key_for(page), page)
+        job.signals.done.connect(self._on_page_loaded)
+        self._threads.start(job)
+
+    def _on_page_loaded(self, key: str, image: object, error: str) -> None:
+        if error:
+            log.debug("page load failed for %s: %s", key, error)
+        self.page_loaded.emit(key, image, error)
+
+    def _on_ready(self, key: str, png: bytes) -> None:
+        # Runs on the UI thread, the only place a QPixmap may be created.
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(png, "PNG"):
+            self._on_failed(key, "could not decode thumbnail")
+            return
         self._pending.discard(key)
         self._cache[key] = pixmap
         while len(self._cache) > self._capacity:
