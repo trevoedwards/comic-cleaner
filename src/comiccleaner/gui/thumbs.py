@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import logging
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
 
 from PIL import Image
@@ -57,9 +59,11 @@ class _ThumbSignals(QObject):
 
 
 class _ThumbJob(QRunnable):
-    def __init__(self, pool: ArchivePool, key: str, page: PageEntry) -> None:
+    def __init__(self, pool: ArchivePool, key: str, page: PageEntry, parent: QObject) -> None:
         super().__init__()
-        self.signals = _ThumbSignals()
+        # Owned by the cache, which disposes of it once the answer is in: a runnable
+        # cannot own a QObject, and an unparented one would outlive every job.
+        self.signals = _ThumbSignals(parent)
         self._pool = pool
         self._key = key
         self._page = page
@@ -85,9 +89,9 @@ class _PageSignals(QObject):
 class _PageJob(QRunnable):
     """Decodes one page at full size for the preview window."""
 
-    def __init__(self, pool: ArchivePool, key: str, page: PageEntry) -> None:
+    def __init__(self, pool: ArchivePool, key: str, page: PageEntry, parent: QObject) -> None:
         super().__init__()
-        self.signals = _PageSignals()
+        self.signals = _PageSignals(parent)
         self._pool = pool
         self._key = key
         self._page = page
@@ -103,16 +107,57 @@ class _PageJob(QRunnable):
             self.signals.done.emit(self._key, None, str(exc))
 
 
+class _TaskSignals(QObject):
+    # key, whatever the task returned (or None), and an error message when it failed.
+    done = Signal(str, object, str)
+
+
+class _TaskJob(QRunnable):
+    """Runs a pure-Python function (no Qt objects) on the thumbnail thread."""
+
+    def __init__(self, key: str, fn: Callable[[], object], parent: QObject) -> None:
+        super().__init__()
+        self.signals = _TaskSignals(parent)
+        self._key = key
+        self._fn = fn
+
+    def run(self) -> None:  # executed on a pool thread
+        try:
+            result = self._fn()
+        except Exception as exc:
+            self.signals.done.emit(self._key, None, str(exc))
+            return
+        self.signals.done.emit(self._key, result, "")
+
+
+def _dispose(signals: QObject | None) -> None:
+    """Cut a finished job's signals loose and let Qt delete them."""
+    if signals is None:
+        return
+    for name in ("ready", "failed", "done"):
+        signal = getattr(signals, name, None)
+        if signal is not None:
+            with contextlib.suppress(RuntimeError, TypeError):
+                signal.disconnect()
+    signals.deleteLater()
+
+
 class ThumbnailCache(QObject):
     """Requests thumbnails off the UI thread and caches the results."""
 
     ready = Signal(str, QPixmap)
     page_loaded = Signal(str, object, str)
+    task_done = Signal(str, object, str)
 
     def __init__(self, parent: QObject | None = None, capacity: int = 600) -> None:
         super().__init__(parent)
         self._cache: OrderedDict[str, QPixmap] = OrderedDict()
         self._pending: set[str] = set()
+        # The signals object of every job still queued or running, by key, so it
+        # can be disposed of when its answer arrives or the queue is dropped.
+        self._jobs: dict[str, QObject] = {}
+        self._page_jobs: dict[str, QObject] = {}
+        self._task_jobs: dict[str, QObject] = {}
         self._capacity = capacity
         self._pool = ArchivePool()
         # Archive reads are I/O bound and the pool is not reentrant-safe, so a
@@ -134,9 +179,10 @@ class ThumbnailCache(QObject):
             return cached
         if key not in self._pending:
             self._pending.add(key)
-            job = _ThumbJob(self._pool, key, page)
+            job = _ThumbJob(self._pool, key, page, self)
             job.signals.ready.connect(self._on_ready)
             job.signals.failed.connect(self._on_failed)
+            self._jobs[key] = job.signals
             self._threads.start(job)
         return self._placeholder
 
@@ -147,13 +193,38 @@ class ThumbnailCache(QObject):
         """Decode a page at full size; the answer arrives through page_loaded.
 
         Shares the thumbnail thread and its open archives, so a cbr that was just
-        extracted for the grid is not extracted all over again.
+        extracted for the grid is not extracted all over again. A page already
+        queued is not queued twice; its one answer reaches every listener.
         """
-        job = _PageJob(self._pool, self.key_for(page), page)
+        key = self.key_for(page)
+        if key in self._page_jobs:
+            return
+        job = _PageJob(self._pool, key, page, self)
         job.signals.done.connect(self._on_page_loaded)
+        self._page_jobs[key] = job.signals
         self._threads.start(job)
 
+    def run_task(self, key: str, fn: Callable[[], object]) -> None:
+        """Run `fn` on the thumbnail thread; its result arrives through task_done.
+
+        `fn` must not touch Qt objects. Queued behind the page loads, so work that
+        needs a page (a difference image, say) runs after it has been decoded.
+        """
+        if key in self._task_jobs:
+            return
+        job = _TaskJob(key, fn, self)
+        job.signals.done.connect(self._on_task_done)
+        self._task_jobs[key] = job.signals
+        self._threads.start(job)
+
+    def _on_task_done(self, key: str, result: object, error: str) -> None:
+        _dispose(self._task_jobs.pop(key, None))
+        if error:
+            log.debug("background task failed for %s: %s", key, error)
+        self.task_done.emit(key, result, error)
+
     def _on_page_loaded(self, key: str, image: object, error: str) -> None:
+        _dispose(self._page_jobs.pop(key, None))
         if error:
             log.debug("page load failed for %s: %s", key, error)
         self.page_loaded.emit(key, image, error)
@@ -161,9 +232,10 @@ class ThumbnailCache(QObject):
     def _on_ready(self, key: str, png: bytes) -> None:
         # Runs on the UI thread, the only place a QPixmap may be created.
         pixmap = QPixmap()
-        if not pixmap.loadFromData(png, "PNG"):
+        if not pixmap.loadFromData(png):  # Qt recognises the PNG by itself
             self._on_failed(key, "could not decode thumbnail")
             return
+        _dispose(self._jobs.pop(key, None))
         self._pending.discard(key)
         self._cache[key] = pixmap
         while len(self._cache) > self._capacity:
@@ -171,6 +243,7 @@ class ThumbnailCache(QObject):
         self.ready.emit(key, pixmap)
 
     def _on_failed(self, key: str, message: str) -> None:
+        _dispose(self._jobs.pop(key, None))
         self._pending.discard(key)
         log.debug("thumbnail failed for %s: %s", key, message)
         self._cache[key] = self._placeholder
@@ -185,6 +258,12 @@ class ThumbnailCache(QObject):
         self._threads.clear()
         self._threads.waitForDone(5000)
         self._pending.clear()
+        # Jobs dropped from the queue never answer, so their signals go now. An
+        # answer already emitted is still delivered, and handled as usual.
+        for jobs in (self._jobs, self._page_jobs, self._task_jobs):
+            for signals in jobs.values():
+                _dispose(signals)
+            jobs.clear()
         self._pool.close_all()
 
     def invalidate(self, archive: Path) -> None:

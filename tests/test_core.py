@@ -10,20 +10,31 @@ import warnings
 import zipfile
 from pathlib import Path
 
+import numpy as np
+import pytest
+
 from comiccleaner.core import extern, grouping, remover
-from comiccleaner.core.archive import TEMP_PREFIX, ComicArchive, is_page_name, natural_key
+from comiccleaner.core.archive import (
+    TEMP_PREFIX,
+    ArchiveError,
+    ComicArchive,
+    is_page_name,
+    natural_key,
+)
 from comiccleaner.core.cache import HashCache
 from comiccleaner.core.comicinfo import update_comicinfo
 from comiccleaner.core.grouping import GroupingOptions, build_groups
-from comiccleaner.core.hashing import digest_image, hamming
+from comiccleaner.core.hashing import content_digest, digest_image, hamming
 from comiccleaner.core.model import ArchiveKind, Decision, MatchKind, PageEntry
 from comiccleaner.core.remover import (
+    DEFAULT_MAX_FRACTION,
     BackupPolicy,
     RemovalPlan,
     apply_plan,
     apply_removals,
     build_plans,
     is_backup_name,
+    split_by_fraction,
 )
 from comiccleaner.core.scanner import find_archives, scan_archive, scan_archives
 
@@ -164,8 +175,9 @@ def test_skip_first_page_protects_covers(tmp_path: Path) -> None:
         write_archive(books / f"V{number}.cbz", [shared_cover, make_page(seed=number)])
     archives = scan_archives(find_archives([books]))
 
-    assert len(build_groups(archives, GroupingOptions())) == 1
+    assert len(build_groups(archives, GroupingOptions(skip_first_page=False))) == 1
     assert build_groups(archives, GroupingOptions(skip_first_page=True)) == []
+    assert build_groups(archives, GroupingOptions()) == []  # covers are safe by default
 
 
 def test_ignored_groups_are_hidden(library: Path) -> None:
@@ -270,6 +282,15 @@ def _mark_all_for_deletion(groups: list) -> list:
     return groups
 
 
+def _plan(book: Path, names: set[str], pages: int) -> RemovalPlan:
+    """A plan for `names`, carrying the fingerprints a scan would have recorded."""
+    with ComicArchive(book) as arc:
+        shas = {n: content_digest(arc.read(n)) for n in names}
+    return RemovalPlan(
+        archive=book, remove_names=set(names), original_pages=pages, expected_sha=shas
+    )
+
+
 def test_removal_strips_the_advert_from_every_book(library: Path) -> None:
     archives = scan_archives(find_archives([library]))
     groups = _mark_all_for_deletion(build_groups(archives, GroupingOptions(threshold=8)))
@@ -355,9 +376,7 @@ def test_kept_pages_are_not_removed(library: Path) -> None:
 
 def test_refuses_to_empty_an_archive(tmp_path: Path) -> None:
     book = write_archive(tmp_path / "Tiny.cbz", [make_page(seed=1), make_page(seed=2)])
-    plan = RemovalPlan(
-        archive=book, remove_names={"page001.jpg", "page002.jpg"}, original_pages=2
-    )
+    plan = _plan(book, {"page001.jpg", "page002.jpg"}, 2)
 
     result = apply_plan(plan)
 
@@ -373,7 +392,7 @@ def test_open_archive_fails_cleanly_without_orphan_backup(library: Path) -> None
     remover uses os.replace and only falls back for genuine cross-volume moves.
     """
     book = library / "Book 01.cbz"
-    plan = RemovalPlan(archive=book, remove_names={"page002.jpg"}, original_pages=5)
+    plan = _plan(book, {"page002.jpg"}, 5)
 
     with zipfile.ZipFile(book) as still_open:
         still_open.namelist()  # keep the OS handle alive across the removal
@@ -497,7 +516,7 @@ def test_converting_never_overwrites_a_sibling_cbz(
     existing = write_archive(tmp_path / "book.cbz", [make_page(seed=50)], comicinfo=False)
     before = existing.read_bytes()
     monkeypatch.setattr(remover, "detect_kind", lambda _p: ArchiveKind.RAR)
-    plan = RemovalPlan(archive=source, remove_names={"page002.jpg"}, original_pages=3)
+    plan = _plan(source, {"page002.jpg"}, 3)
 
     result = apply_plan(plan)
 
@@ -515,7 +534,7 @@ def _rar_pretender(monkeypatch) -> None:
 def test_conversion_without_backup_replaces_the_original(tmp_path: Path, monkeypatch) -> None:
     source = write_archive(tmp_path / "book.cbr", [make_page(seed=i) for i in range(3)])
     _rar_pretender(monkeypatch)
-    plan = RemovalPlan(archive=source, remove_names={"page002.jpg"}, original_pages=3)
+    plan = _plan(source, {"page002.jpg"}, 3)
 
     result = apply_plan(plan, backup=BackupPolicy(enabled=False))
 
@@ -538,7 +557,7 @@ def test_failed_conversion_without_backup_keeps_the_original(
         return real_replace(src, dst)
 
     monkeypatch.setattr(remover.os, "replace", deny_cbz)
-    plan = RemovalPlan(archive=source, remove_names={"page002.jpg"}, original_pages=3)
+    plan = _plan(source, {"page002.jpg"}, 3)
 
     result = apply_plan(plan, backup=BackupPolicy(enabled=False))
 
@@ -571,7 +590,7 @@ def test_removal_from_an_archive_with_a_corrupt_entry_fails_cleanly(tmp_path: Pa
     book = write_archive(tmp_path / "book.cbz", pages)
     _corrupt_page(book, pages[1])
     before = book.read_bytes()
-    plan = RemovalPlan(archive=book, remove_names={"page003.jpg"}, original_pages=4)
+    plan = _plan(book, {"page003.jpg"}, 4)
 
     result = apply_plan(plan)
 
@@ -628,7 +647,7 @@ def test_output_dir_equal_to_the_source_folder_is_refused(tmp_path: Path) -> Non
     """Writing "cleaned copies" over the originals would skip the backup step."""
     book = write_archive(tmp_path / "book.cbz", [make_page(seed=i) for i in range(3)])
     before = book.read_bytes()
-    plan = RemovalPlan(archive=book, remove_names={"page002.jpg"}, original_pages=3)
+    plan = _plan(book, {"page002.jpg"}, 3)
 
     result = apply_plan(plan, output_dir=tmp_path)
 
@@ -651,7 +670,7 @@ def test_rebuilt_archive_keeps_the_original_permissions(tmp_path: Path) -> None:
     book = write_archive(tmp_path / "book.cbz", [make_page(seed=i) for i in range(3)])
     os.chmod(book, 0o444)
     expected = stat.S_IMODE(book.stat().st_mode)
-    plan = RemovalPlan(archive=book, remove_names={"page002.jpg"}, original_pages=3)
+    plan = _plan(book, {"page002.jpg"}, 3)
 
     try:
         result = apply_plan(plan)
@@ -688,7 +707,7 @@ def test_zip_with_a_repeated_entry_name_scans_through_the_cache(tmp_path: Path) 
 
 def test_removal_works_on_a_zip_with_a_repeated_entry_name(tmp_path: Path) -> None:
     book = _zip_with_duplicate_entry(tmp_path / "dup.cbz")
-    plan = RemovalPlan(archive=book, remove_names={"page003.jpg"}, original_pages=3)
+    plan = _plan(book, {"page003.jpg"}, 3)
 
     result = apply_plan(plan)
 
@@ -746,7 +765,7 @@ def test_output_dir_mirrors_folders_so_same_named_books_do_not_collide(tmp_path:
 
 def test_dry_run_creates_no_output_folders(tmp_path: Path) -> None:
     book = write_archive(tmp_path / "src" / "book.cbz", [make_page(seed=i) for i in range(3)])
-    plan = RemovalPlan(archive=book, remove_names={"page002.jpg"}, original_pages=3)
+    plan = _plan(book, {"page002.jpg"}, 3)
     out = tmp_path / "cleaned" / "deep"
 
     result = apply_removals([plan], output_dir=out, dry_run=True).results[0]
@@ -759,7 +778,7 @@ def test_unusable_output_folder_is_reported_plainly(tmp_path: Path) -> None:
     book = write_archive(tmp_path / "book.cbz", [make_page(seed=i) for i in range(3)])
     blocker = tmp_path / "not_a_folder"
     blocker.write_text("in the way")
-    plan = RemovalPlan(archive=book, remove_names={"page002.jpg"}, original_pages=3)
+    plan = _plan(book, {"page002.jpg"}, 3)
 
     result = apply_removals([plan], output_dir=blocker / "sub").results[0]
 
@@ -925,3 +944,357 @@ def test_a_different_book_with_the_same_size_is_not_mistaken_for_it(
 
     assert cache.get(other, other.stat().st_size, other.stat().st_mtime_ns) is None
     cache.close()
+
+
+# -- multi-index hashing ---------------------------------------------------
+
+
+def _clustered_hashes(seed: int = 7) -> np.ndarray:
+    """Random 64-bit hashes plus near copies of some, a few bits apart.
+
+    Copies are made at every distance up to 8 bits, so a threshold lands right
+    on the edge of some pairs, which is where an inexact index would slip.
+    """
+    rng = np.random.default_rng(seed)
+    bases = rng.integers(0, 2**64, size=400, dtype=np.uint64)
+    near = []
+    for index, base in enumerate(bases[:200]):
+        flips = rng.choice(64, size=1 + index % 8, replace=False)
+        mask = sum(1 << int(bit) for bit in flips)
+        near.append(int(base) ^ mask)
+    return np.unique(np.concatenate([bases, np.array(near, dtype=np.uint64)]))
+
+
+def _as_sets(clusters: list[list[int]]) -> set[frozenset[int]]:
+    return {frozenset(c) for c in clusters}
+
+
+def test_multi_index_hashing_finds_exactly_what_brute_force_does(monkeypatch) -> None:
+    hashes = _clustered_hashes()
+    for threshold in (1, 2, 3, 4, 6, 8):
+        monkeypatch.setattr(grouping, "_BRUTE_FORCE_LIMIT", 10**9)
+        brute = grouping._cluster_by_distance(hashes, threshold)
+        # Below the set's size, so the banded index is what runs.
+        monkeypatch.setattr(grouping, "_BRUTE_FORCE_LIMIT", 10)
+        indexed = grouping._cluster_by_distance(hashes, threshold)
+
+        assert _as_sets(indexed) == _as_sets(brute), f"threshold {threshold}"
+        assert any(len(c) > 1 for c in brute)  # the comparison had matches to find
+
+
+# -- archives that point outside themselves --------------------------------
+
+
+def _fake_rar(path: Path) -> Path:
+    """Enough of a RAR header for the archive to be handed to an extractor."""
+    path.write_bytes(b"Rar!\x1a\x07\x00" + bytes(32))
+    return path
+
+
+def _extracting(monkeypatch, build) -> None:
+    """Stand in for 7-Zip/UnRAR: `build` lays out the extracted tree."""
+    from comiccleaner.core import archive as archive_module
+
+    monkeypatch.setattr(
+        archive_module, "extract_all", lambda _src, dest, kind: build(Path(dest))
+    )
+
+
+def _outside(tmp_path: Path) -> tuple[Path, bytes]:
+    secret = make_page(seed=31337)
+    folder = tmp_path / "elsewhere"
+    folder.mkdir()
+    (folder / "secret.jpg").write_bytes(secret)
+    return folder, secret
+
+
+def _assert_nothing_from_outside(book: Path, secret: bytes, folder: Path) -> None:
+    with ComicArchive(book) as arc:
+        names = arc.entry_names()
+        assert names == ["page001.jpg"]
+        assert all(arc.read(n) != secret for n in names)
+        for linked in ("page002.jpg", "linked/secret.jpg"):
+            with pytest.raises(ArchiveError):
+                arc.read(linked)
+    info = scan_archive(book)
+    assert content_digest(secret) not in {p.content_sha for p in info.pages}
+    # Cleaning up the extract must not have followed the link either.
+    assert (folder / "secret.jpg").read_bytes() == secret
+
+
+def test_extracted_symlinks_are_never_followed(tmp_path: Path, monkeypatch) -> None:
+    folder, secret = _outside(tmp_path)
+    try:
+        os.symlink(folder / "secret.jpg", tmp_path / "probe")
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"this account cannot create symlinks here: {exc}")
+
+    def build(dest: Path) -> None:
+        (dest / "page001.jpg").write_bytes(make_page(seed=1))
+        os.symlink(folder / "secret.jpg", dest / "page002.jpg")
+        os.symlink(folder, dest / "linked", target_is_directory=True)
+
+    _extracting(monkeypatch, build)
+    _assert_nothing_from_outside(_fake_rar(tmp_path / "book.cbr"), secret, folder)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="directory junctions are Windows-only")
+def test_extracted_junctions_are_never_followed(tmp_path: Path, monkeypatch) -> None:
+    """A junction needs no special privilege, unlike a Windows symlink."""
+    import _winapi
+
+    folder, secret = _outside(tmp_path)
+
+    def build(dest: Path) -> None:
+        (dest / "page001.jpg").write_bytes(make_page(seed=1))
+        _winapi.CreateJunction(str(folder), str(dest / "linked"))
+
+    _extracting(monkeypatch, build)
+    _assert_nothing_from_outside(_fake_rar(tmp_path / "book.cbr"), secret, folder)
+
+
+# -- removal safety --------------------------------------------------------
+
+
+def test_removal_streams_the_kept_pages_rather_than_reading_them_whole(
+    library: Path, monkeypatch
+) -> None:
+    archives = scan_archives(find_archives([library]))
+    groups = _mark_all_for_deletion(build_groups(archives, GroupingOptions(threshold=8)))
+    plans = build_plans(groups, {a.path: a.page_count for a in archives})
+    real_read = ComicArchive.read
+    read_whole: list[str] = []
+
+    def tracking(self, name):
+        read_whole.append(name)
+        return real_read(self, name)
+
+    monkeypatch.setattr(ComicArchive, "read", tracking)
+
+    report = apply_removals(plans)
+
+    assert not report.failed, [r.error for r in report.failed]
+    # Only the page being checked before removal, and the small XML being edited.
+    assert set(read_whole) == {"page002.jpg", "ComicInfo.xml"}
+    assert all(scan_archive(a.path).page_count == 4 for a in archives)
+
+
+@pytest.mark.parametrize("expected", [{}, {"page003.jpg": ""}])
+def test_a_marked_page_with_no_scanned_fingerprint_is_never_removed(
+    tmp_path: Path, expected: dict
+) -> None:
+    """Without its hash, a name is the only identity left, and names are not enough."""
+    book = write_archive(tmp_path / "book.cbz", [make_page(seed=i) for i in range(5)])
+    before = book.read_bytes()
+    with ComicArchive(book) as arc:
+        shas = {"page002.jpg": content_digest(arc.read("page002.jpg")), **expected}
+    plan = RemovalPlan(
+        archive=book, remove_names={"page002.jpg", "page003.jpg"}, original_pages=5,
+        expected_sha=shas,
+    )
+
+    result = apply_plan(plan)
+
+    assert result.error is not None and "page003.jpg" in result.error
+    assert result.removed == 0
+    assert book.read_bytes() == before  # not even the page that could be verified
+    assert not list(tmp_path.glob("*.bak"))
+
+
+def test_split_by_fraction_is_inclusive_and_distrusts_unknown_lengths() -> None:
+    quarter = RemovalPlan(archive=Path("a.cbz"), remove_names={"x"}, original_pages=4)
+    half = RemovalPlan(archive=Path("b.cbz"), remove_names={"x", "y"}, original_pages=4)
+    unknown = RemovalPlan(archive=Path("c.cbz"), remove_names={"x"}, original_pages=0)
+
+    assert split_by_fraction([quarter, half, unknown]) == ([quarter], [half, unknown])
+    assert split_by_fraction([quarter, half], 0.5) == ([quarter, half], [])
+    assert DEFAULT_MAX_FRACTION == 0.25
+
+
+# -- ComicInfo namespaces --------------------------------------------------
+
+_XSI = "http://www.w3.org/2001/XMLSchema-instance"
+_ANANSI = "https://anansi-project.github.io/docs/comicinfo/schemas/v2.1"
+
+
+def _pages_of(xml: bytes) -> tuple[str | None, list[str]]:
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(xml)
+    local = {el.tag.rsplit("}", 1)[-1]: el for el in root}
+    count = local["PageCount"].text if "PageCount" in local else None
+    return count, [p.get("Image") for p in local["Pages"]]
+
+
+def test_comicinfo_in_a_default_namespace_is_updated_and_keeps_it() -> None:
+    import xml.etree.ElementTree as ET
+
+    registry = dict(ET._namespace_map)
+    original = (
+        f'<?xml version="1.0"?><ComicInfo xmlns="{_ANANSI}" xmlns:xsi="{_XSI}">'
+        '<Series xsi:nil="false">S</Series><PageCount>4</PageCount><Pages>'
+        '<Page Image="0" Type="FrontCover"/><Page Image="1" Type="Advertisement"/>'
+        '<Page Image="3"/></Pages></ComicInfo>'
+    ).encode()
+
+    updated = update_comicinfo(original, {1}, 3)
+
+    assert _pages_of(updated) == ("3", ["0", "2"])
+    text = updated.decode()
+    assert f'<ComicInfo xmlns="{_ANANSI}"' in text
+    assert f'xmlns:xsi="{_XSI}"' in text and 'xsi:nil="false"' in text
+    assert "ns0" not in text
+    assert dict(ET._namespace_map) == registry  # nothing leaks to the next book
+
+
+def test_comicinfo_with_a_prefixed_namespace_gains_page_count_in_it() -> None:
+    original = (
+        f'<ci:ComicInfo xmlns:ci="{_ANANSI}"><ci:Pages>'
+        '<ci:Page Image="0"/><ci:Page Image="2"/></ci:Pages></ci:ComicInfo>'
+    ).encode()
+
+    updated = update_comicinfo(original, {1}, 2)
+
+    assert _pages_of(updated) == ("2", ["0", "1"])
+    assert "<ci:PageCount>2</ci:PageCount>" in updated.decode()
+    assert "ns0" not in updated.decode()
+
+
+def test_plain_comicinfo_is_written_exactly_as_before() -> None:
+    original = (
+        b'<?xml version="1.0"?>\n'
+        b'<ComicInfo xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+        b'xmlns:xsd="http://www.w3.org/2001/XMLSchema">\n'
+        b"  <Series>S</Series>\n  <PageCount>4</PageCount>\n  <Pages>\n"
+        b'    <Page Image="0" Type="FrontCover" />\n'
+        b'    <Page Image="2" Type="Advertisement" />\n'
+        b'    <Page Image="3" />\n  </Pages>\n</ComicInfo>\n'
+    )
+
+    assert update_comicinfo(original, {2}, 3) == (
+        b"<?xml version='1.0' encoding='utf-8'?>\n"
+        b"<ComicInfo>\n  <Series>S</Series>\n  <PageCount>3</PageCount>\n  <Pages>\n"
+        b'    <Page Image="0" Type="FrontCover" />\n    <Page Image="2" />\n'
+        b"  </Pages>\n</ComicInfo>"
+    )
+
+
+# -- cached decode failures ------------------------------------------------
+
+_UNREADABLE = b"not an image at all"
+
+
+def _book_with_a_bad_page(path: Path) -> Path:
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("page001.jpg", make_page(seed=1))
+        zf.writestr("page002.jpg", _UNREADABLE)
+        zf.writestr("page003.jpg", make_page(seed=3))
+    return path
+
+
+def _count_decodes(monkeypatch, *, now_readable: bool = False) -> list[bytes]:
+    """Record every decode; optionally pretend a new codec can read the bad page."""
+    from comiccleaner.core import scanner
+
+    seen: list[bytes] = []
+    real = scanner.digest_image
+
+    def digest(data: bytes):
+        seen.append(data)
+        if now_readable and data == _UNREADABLE:
+            return real(make_page(seed=2))
+        return real(data)
+
+    monkeypatch.setattr(scanner, "digest_image", digest)
+    return seen
+
+
+def test_a_decode_failure_is_retried_only_when_the_codecs_change(
+    tmp_path: Path, monkeypatch
+) -> None:
+    book = _book_with_a_bad_page(tmp_path / "book.cbz")
+    db = tmp_path / "cache.sqlite"
+    cache = HashCache(db, codecs="pillow-old")
+    first = scan_archive(book, cache)
+    cache.close()
+    assert [p.error is not None for p in first.pages] == [False, True, False]
+
+    # Same Pillow as before: everything, the failure included, comes from the cache.
+    decoded = _count_decodes(monkeypatch)
+    cache = HashCache(db, codecs="pillow-old")
+    assert scan_archive(book, cache).pages[1].error is not None
+    cache.close()
+    assert decoded == []
+
+    # A different Pillow: only the failed page is decoded again, and now it reads.
+    decoded = _count_decodes(monkeypatch, now_readable=True)
+    cache = HashCache(db, codecs="pillow-new")
+    upgraded = scan_archive(book, cache)
+    assert decoded == [_UNREADABLE]
+    assert all(p.error is None for p in upgraded.pages)
+    assert [p.content_sha for p in upgraded.pages][::2] == [
+        p.content_sha for p in first.pages
+    ][::2]
+
+    decoded.clear()
+    scan_archive(book, cache)  # and the fixed page is now simply cached
+    cache.close()
+    assert decoded == []
+
+
+def test_a_failure_that_persists_is_not_retried_again_under_the_same_codecs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    book = _book_with_a_bad_page(tmp_path / "book.cbz")
+    db = tmp_path / "cache.sqlite"
+    cache = HashCache(db, codecs="a")
+    scan_archive(book, cache)
+    cache.close()
+
+    decoded = _count_decodes(monkeypatch)
+    cache = HashCache(db, codecs="b")
+    scan_archive(book, cache)
+    scan_archive(book, cache)
+    cache.close()
+
+    assert decoded == [_UNREADABLE]  # once for the new codecs, then cached
+
+
+def test_a_cache_from_before_codec_stamps_opens_and_retries_its_failures(
+    tmp_path: Path,
+) -> None:
+    import sqlite3
+
+    book = _book_with_a_bad_page(tmp_path / "book.cbz")
+    stat = book.stat()
+    key = str(book.resolve())
+    db = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE archives (path TEXT PRIMARY KEY, size INTEGER NOT NULL, "
+        "mtime_ns INTEGER NOT NULL, scanned_at REAL NOT NULL DEFAULT 0);"
+        "CREATE TABLE pages (path TEXT NOT NULL, name TEXT NOT NULL, idx INTEGER NOT NULL, "
+        "size INTEGER NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL, "
+        "content_sha TEXT NOT NULL, dhash INTEGER NOT NULL, flat INTEGER NOT NULL DEFAULT 0, "
+        "error TEXT, PRIMARY KEY (path, name));"
+    )
+    conn.execute("INSERT INTO archives(path, size, mtime_ns) VALUES (?, ?, ?)",
+                 (key, stat.st_size, stat.st_mtime_ns))
+    conn.executemany(
+        "INSERT INTO pages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (key, "page001.jpg", 0, 10, 400, 600, "a" * 64, 1, 0, None),
+            (key, "page002.jpg", 1, 10, 0, 0, "", 0, 0, "could not decode image"),
+            (key, "page003.jpg", 2, 10, 400, 600, "c" * 64, 3, 0, None),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    cache = HashCache(db, codecs="today")
+    try:
+        cached = cache.get(book, stat.st_size, stat.st_mtime_ns)
+        assert cached is not None and len(cached) == 3
+        assert cache.stale_errors(book) == {"page002.jpg"}
+    finally:
+        cache.close()

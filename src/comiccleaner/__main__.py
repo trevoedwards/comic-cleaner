@@ -189,8 +189,12 @@ def run_self_test(paths: list[Path]) -> int:
         emit("FAIL: no pages were decoded - the image codecs are not working")
         return finish(1)
 
+    # Deliberately looser than the product defaults: this proves grouping works on
+    # whatever sample it is given, and a one-book sample, or one whose repeat is
+    # its first page, would otherwise report nothing at all.
     for threshold in (0, 4):
-        groups = build_groups(scanned, GroupingOptions(threshold=threshold))
+        options = GroupingOptions(threshold=threshold, min_archives=1, skip_first_page=False)
+        groups = build_groups(scanned, options)
         summary = ", ".join(
             f"{g.page_count} copies/{g.archive_count} books/{g.kind.value}"
             for g in groups[:4]

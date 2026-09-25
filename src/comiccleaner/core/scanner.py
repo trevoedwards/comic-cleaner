@@ -8,7 +8,14 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .archive import ARCHIVE_SUFFIXES, TEMP_PREFIX, ArchiveError, ComicArchive, detect_kind
+from .archive import (
+    ARCHIVE_SUFFIXES,
+    TEMP_PREFIX,
+    WALKED_SUFFIXES,
+    ArchiveError,
+    ComicArchive,
+    detect_kind,
+)
 from .cache import HashCache
 from .hashing import DecodeError, digest_image
 from .model import ArchiveInfo, ArchiveKind, PageEntry
@@ -25,23 +32,27 @@ ProgressFn = Callable[[int, int, str], None]
 _NOT_ARCHIVE_PREFIXES = ("._", TEMP_PREFIX)
 
 
-def _is_archive_file(path: Path) -> bool:
+def _is_archive_file(path: Path, suffixes: set[str] = ARCHIVE_SUFFIXES) -> bool:
     return (
-        path.suffix.lower() in ARCHIVE_SUFFIXES
+        path.suffix.lower() in suffixes
         and not path.name.startswith(_NOT_ARCHIVE_PREFIXES)
         and path.is_file()
     )
 
 
 def find_archives(paths: Iterable[Path], *, recursive: bool = True) -> list[Path]:
-    """Expand a mix of dropped files and folders into a sorted archive list."""
+    """Expand a mix of dropped files and folders into a sorted archive list.
+
+    Folders yield only comic suffixes (see WALKED_SUFFIXES); a file named
+    directly is taken with any archive suffix.
+    """
     found: set[Path] = set()
     for raw in paths:
         path = Path(raw)
         if path.is_dir():
             walker = path.rglob("*") if recursive else path.glob("*")
             for child in walker:
-                if _is_archive_file(child):
+                if _is_archive_file(child, WALKED_SUFFIXES):
                     found.add(child.resolve())
         elif _is_archive_file(path):
             found.add(path.resolve())
@@ -64,6 +75,8 @@ def scan_archive(path: Path, cache: HashCache | None = None) -> ArchiveInfo:
     if cache is not None:
         cached = cache.get(path, stat.st_size, stat.st_mtime_ns)
         if cached is not None:
+            if any(p.error for p in cached):
+                cached = _retry_stale_errors(path, cached, cache, stat)
             info.pages = cached
             info.page_count = len(cached)
             return info
@@ -72,30 +85,7 @@ def scan_archive(path: Path, cache: HashCache | None = None) -> ArchiveInfo:
     try:
         with ComicArchive(path) as arc:
             for index, name in enumerate(arc.page_names()):
-                try:
-                    data = arc.read(name)
-                except (ArchiveError, OSError) as exc:
-                    pages.append(_error_page(path, name, index, str(exc)))
-                    continue
-                stored = arc.stored_size(name)
-                try:
-                    digest = digest_image(data)
-                except DecodeError as exc:
-                    pages.append(_error_page(path, name, index, str(exc), size=stored))
-                    continue
-                pages.append(
-                    PageEntry(
-                        archive=path,
-                        name=name,
-                        index=index,
-                        size=stored,
-                        width=digest.width,
-                        height=digest.height,
-                        content_sha=digest.content_sha,
-                        dhash=digest.dhash,
-                        flat=digest.flat,
-                    )
-                )
+                pages.append(_hash_page(arc, path, name, index))
     except ArchiveError as exc:
         info.error = str(exc)
         return info
@@ -105,6 +95,55 @@ def scan_archive(path: Path, cache: HashCache | None = None) -> ArchiveInfo:
     if cache is not None:
         cache.put(path, stat.st_size, stat.st_mtime_ns, pages)
     return info
+
+
+def _hash_page(arc: ComicArchive, path: Path, name: str, index: int) -> PageEntry:
+    """One page's digest, or a page carrying the reason it could not be read."""
+    try:
+        data = arc.read(name)
+    except (ArchiveError, OSError) as exc:
+        return _error_page(path, name, index, str(exc))
+    stored = arc.stored_size(name)
+    try:
+        digest = digest_image(data)
+    except DecodeError as exc:
+        return _error_page(path, name, index, str(exc), size=stored)
+    return PageEntry(
+        archive=path,
+        name=name,
+        index=index,
+        size=stored,
+        width=digest.width,
+        height=digest.height,
+        content_sha=digest.content_sha,
+        dhash=digest.dhash,
+        flat=digest.flat,
+    )
+
+
+def _retry_stale_errors(
+    path: Path, cached: list[PageEntry], cache: HashCache, stat: os.stat_result
+) -> list[PageEntry]:
+    """Decode again only the cached failures a newer Pillow might now read.
+
+    The archive is unchanged (the cache checked its size and time), so every
+    other page keeps its cached hash and page positions still line up.
+    """
+    stale = cache.stale_errors(path)
+    if not stale:
+        return cached
+    try:
+        with ComicArchive(path) as arc:
+            pages = [
+                _hash_page(arc, path, p.name, p.index) if p.name in stale else p
+                for p in cached
+            ]
+    except ArchiveError as exc:
+        # Cannot even open it right now; keep what we had and try again next time.
+        log.debug("could not retry failed pages of %s: %s", path, exc)
+        return cached
+    cache.put(path, stat.st_size, stat.st_mtime_ns, pages)
+    return pages
 
 
 def _error_page(

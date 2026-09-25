@@ -50,6 +50,9 @@ python -m comiccleaner "/path/to/comics"        # paths are optional
 ```
 
 1. **Import** — drag archives or folders in, or use *Add Files* / *Add Folder*.
+   A folder brings in its `.cbz`, `.zip`, `.cbr` and `.cb7` files. Plain `.rar`
+   and `.7z` files are skipped there, since they are usually not comics; add one
+   directly (or name it on the command line) and it is imported like any other.
 2. **Scan** — pages are decoded and hashed, then cached against each file's size
    and mtime, so re-scanning an unchanged library is instant. The cache follows a
    library that has been moved, too.

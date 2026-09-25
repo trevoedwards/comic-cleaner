@@ -76,6 +76,38 @@ def test_a_gui_removal_can_be_undone_from_history(window, library, monkeypatch):
     assert len(window.groups) == 1  # the advert is back, and found again
 
 
+def test_restoring_a_book_taken_out_of_the_library_brings_it_back(
+    window, library, monkeypatch
+):
+    window.settings.remember_junk = False
+    window.import_paths([library])
+    window.settings.threshold = 8
+    scan_and_wait(window)
+    window._set_all_decisions(Decision.DELETE)
+    apply_and_wait(window, monkeypatch)
+    gone = (library / "Book 01.cbz").resolve()
+    window.archive_list.clearSelection()
+    for row in range(window.archive_list.count()):
+        item = window.archive_list.item(row)
+        item.setSelected(Path(item.data(0x0100)) == gone)
+    window.remove_selected_archives()
+    assert gone not in window.archives
+
+    dialog = HistoryDialog(window.cache, window)
+    try:
+        dialog.tree.topLevelItem(0).setSelected(True)
+        dialog.restore_selected(confirm=False)
+    finally:
+        dialog.done(QDialog.DialogCode.Accepted)
+    window._after_restore(dialog.restored)
+    assert pump_until(lambda: window._scan_worker is None), "rescan did not finish"
+
+    assert gone in window.archives
+    assert window.archives[gone].page_count == 5  # scanned again, advert and all
+    assert "added back to the library" in window.status_label.text()
+    assert len(window.groups) == 1 and window.groups[0].archive_count == 3
+
+
 def test_a_dry_run_does_not_appear_in_history(window, library, monkeypatch):
     window.import_paths([library])
     scan_and_wait(window)

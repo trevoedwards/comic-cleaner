@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import tempfile
+import time
 import zipfile
 import zlib
+from collections.abc import Iterable
 from pathlib import Path
+from typing import IO
 
 from .extern import ExtractionError, extract_all
 from .model import IMAGE_SUFFIXES, NON_PAGE_NAMES, ArchiveKind
@@ -17,11 +21,23 @@ log = logging.getLogger(__name__)
 
 ARCHIVE_SUFFIXES = {".cbz", ".zip", ".cbr", ".rar", ".cb7", ".7z"}
 
+# What a folder walk picks up. Plain .rar and .7z files are more often ordinary
+# archives (installers, backups, downloads) than comics, so a folder import skips
+# them; a file chosen by name is still accepted with any suffix above.
+WALKED_SUFFIXES = {".cbz", ".zip", ".cbr", ".cb7"}
+
 # Prefix of the temp file a removal writes before swapping it in for the original.
 TEMP_PREFIX = ".comiccleaner-"
 
 # Windows path separator, spelled via chr() so it survives any escaping layer.
 SEP_ALT = chr(92)
+
+# Read size when streaming an entry from one archive into another.
+_COPY_CHUNK = 1 << 20
+
+# Everything zipfile raises for one bad entry: a bad CRC, truncated data,
+# encryption or an exotic compression method.
+_ZIP_ENTRY_ERRORS = (zipfile.BadZipFile, zlib.error, EOFError, RuntimeError, NotImplementedError)
 
 
 class ArchiveError(RuntimeError):
@@ -115,11 +131,7 @@ class ComicArchive:
         except ExtractionError as exc:
             self.close()
             raise ArchiveError(str(exc)) from exc
-        # Map archive-relative entry names to the files on disk.
-        mapping: dict[str, Path] = {}
-        for file in tmp.rglob("*"):
-            if file.is_file():
-                mapping[file.relative_to(tmp).as_posix()] = file
+        mapping = _extracted_files(tmp)
         if not mapping:
             self.close()
             raise ArchiveError(f"{self.path.name} extracted to nothing")
@@ -156,22 +168,37 @@ class ComicArchive:
         if self._zip is not None:
             try:
                 return self._zip.read(name)
-            except (
-                zipfile.BadZipFile,
-                zlib.error,
-                EOFError,
-                RuntimeError,
-                NotImplementedError,
-            ) as exc:
-                # Bad CRC, truncated data, encryption or an exotic compression
-                # method: one bad entry, not a reason to abort the whole scan/run.
+            except _ZIP_ENTRY_ERRORS as exc:
+                # One bad entry, not a reason to abort the whole scan/run.
                 raise ArchiveError(f"cannot read {name}: {exc}") from exc
         if self._extracted is not None:
-            file = self._extracted.get(name)
-            if file is None:
-                raise ArchiveError(f"missing entry {name}")
-            return file.read_bytes()
+            return self._extracted_file(name).read_bytes()
         raise ArchiveError("archive is not open")
+
+    def copy_to(self, name: str, dest: IO[bytes]) -> None:
+        """Stream one entry into `dest`, never holding the whole entry in memory."""
+        if self._zip is not None:
+            try:
+                with self._zip.open(name) as src:
+                    shutil.copyfileobj(src, dest, _COPY_CHUNK)
+            except _ZIP_ENTRY_ERRORS as exc:
+                raise ArchiveError(f"cannot read {name}: {exc}") from exc
+            return
+        if self._extracted is not None:
+            with self._extracted_file(name).open("rb") as src:
+                shutil.copyfileobj(src, dest, _COPY_CHUNK)
+            return
+        raise ArchiveError("archive is not open")
+
+    def _extracted_file(self, name: str) -> Path:
+        assert self._extracted is not None
+        file = self._extracted.get(name)
+        if file is None:
+            raise ArchiveError(f"missing entry {name}")
+        # The listing already left links out; this keeps it so if the tree changed.
+        if file.is_symlink():
+            raise ArchiveError(f"refusing to follow a link: {name}")
+        return file
 
     def entry_size(self, name: str) -> int:
         """Uncompressed size of an entry, without reading it."""
@@ -179,7 +206,7 @@ class ComicArchive:
             return self._zip.getinfo(name).file_size
         if self._extracted is not None:
             file = self._extracted.get(name)
-            return file.stat().st_size if file else 0
+            return file.stat(follow_symlinks=False).st_size if file else 0
         raise ArchiveError("archive is not open")
 
     def stored_size(self, name: str) -> int:
@@ -189,13 +216,64 @@ class ComicArchive:
         return self.entry_size(name)
 
 
-def write_cbz(dest: Path, entries: list[tuple[str, bytes]], *, compress: bool = False) -> None:
-    """Write a CBZ. Images are stored uncompressed by default — they already are.
+def _extracted_files(root: Path) -> dict[str, Path]:
+    """Archive-relative entry names mapped to the regular files under `root`.
 
-    Deflating a JPEG costs CPU and saves ~0%; XML is the one thing worth compressing.
+    A crafted RAR or 7z can hold symlinks, and following one would hash, or
+    re-pack into the cleaned book, some file elsewhere on this machine. Links
+    (to files or folders, and Windows junctions) are skipped, never followed,
+    and anything that still resolves outside `root` is refused.
+    """
+    base = root.resolve()
+    mapping: dict[str, Path] = {}
+    for folder, dirs, files in os.walk(root, followlinks=False):
+        here = Path(folder)
+        dirs[:] = [d for d in dirs if not _is_link(here / d)]
+        for filename in files:
+            file = here / filename
+            if _is_link(file) or not file.is_file():
+                log.warning("skipping link or special file in archive: %s", filename)
+                continue
+            if not file.resolve().is_relative_to(base):
+                log.warning("skipping entry that escapes the archive: %s", filename)
+                continue
+            mapping[file.relative_to(root).as_posix()] = file
+    return mapping
+
+
+def _is_link(path: Path) -> bool:
+    is_junction = getattr(path, "is_junction", None)  # Python 3.12+
+    return path.is_symlink() or bool(is_junction and is_junction())
+
+
+def write_cbz(
+    dest: Path,
+    source: ComicArchive,
+    names: Iterable[str],
+    *,
+    replace: dict[str, bytes] | None = None,
+    compress: bool = False,
+) -> None:
+    """Write a CBZ of `names` from `source`, streaming each entry straight across.
+
+    Only one read buffer is held at a time, so a book never has to fit in memory.
+    `replace` gives new bytes for small entries, such as an updated ComicInfo.xml.
+
+    Images are stored uncompressed by default — they already are. Deflating a
+    JPEG costs CPU and saves ~0%; XML is the one thing worth compressing.
     """
     mode = zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED
+    replace = replace or {}
     with zipfile.ZipFile(dest, "w") as zf:
-        for name, data in entries:
+        for name in names:
             per_entry = zipfile.ZIP_DEFLATED if name.lower().endswith(".xml") else mode
-            zf.writestr(name, data, compress_type=per_entry)
+            if name in replace:
+                zf.writestr(name, replace[name], compress_type=per_entry)
+                continue
+            info = zipfile.ZipInfo(name, date_time=time.localtime(time.time())[:6])
+            info.compress_type = per_entry
+            info.external_attr = 0o600 << 16  # what writestr gives a named entry
+            # Known up front, so zipfile can choose zip64 for a huge entry.
+            info.file_size = source.entry_size(name)
+            with zf.open(info, "w") as out:
+                source.copy_to(name, out)

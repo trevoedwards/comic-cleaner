@@ -28,10 +28,25 @@ from typing import Any, TextIO
 
 from . import __version__
 from .core.cache import HashCache
-from .core.grouping import GroupingOptions, build_groups, near_edge, review_warnings
+from .core.grouping import (
+    MAX_THRESHOLD,
+    GroupingOptions,
+    build_groups,
+    near_edge,
+    review_warnings,
+)
 from .core.history import load_history, record_run, restore, when
 from .core.model import ArchiveInfo, Decision, DuplicateGroup, MatchKind
-from .core.remover import BackupPolicy, RemovalPlan, RemovalReport, apply_removals, build_plans
+from .core.remover import (
+    DEFAULT_MAX_FRACTION,
+    BackupPolicy,
+    RemovalPlan,
+    RemovalReport,
+    apply_removals,
+    build_plans,
+    recover_interrupted,
+    split_by_fraction,
+)
 from .core.scanner import find_archives, scan_archives
 from .core.signatures import (
     SignatureFileError,
@@ -51,11 +66,6 @@ EXIT_OK = 0
 EXIT_FAILURES = 1
 EXIT_REFUSED = 2
 EXIT_INTERRUPTED = 130
-
-# Adverts and credits are a page or three. A plan that would take a large share
-# of a book is far more likely to be two copies of the same issue matching each
-# other page for page, so it is skipped unless the user raises the limit.
-DEFAULT_MAX_FRACTION = 0.25
 
 JSON_VERSION = 1
 
@@ -106,7 +116,7 @@ def _matching_options(parser: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--threshold", type=int, default=0, metavar="BITS",
         help="Hamming distance for 'similar' (0 = identical images only, the default; "
-        "2-6 catches re-encodes).",
+        f"2-6 catches re-encodes; at most {MAX_THRESHOLD}).",
     )
     group.add_argument(
         "--min-copies", type=int, default=2, metavar="N",
@@ -272,8 +282,8 @@ def build_parser() -> argparse.ArgumentParser:
 def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.command in ("known", "history"):
         return
-    if not 0 <= args.threshold <= 32:
-        parser.error("--threshold must be between 0 and 32")
+    if not 0 <= args.threshold <= MAX_THRESHOLD:
+        parser.error(f"--threshold must be between 0 and {MAX_THRESHOLD}")
     if args.min_copies < 2:
         parser.error("--min-copies must be at least 2")
     if args.min_books < 1:
@@ -328,6 +338,18 @@ class _Progress:
             self._width = 0
 
 
+def _recover(args: argparse.Namespace, err: TextIO) -> None:
+    """Put back books an interrupted run left only as a backup, before reading."""
+    for item in recover_interrupted(args.paths, dry_run=args.dry_run):
+        if item.restored:
+            verb = "Would put back" if args.dry_run else "Put back"
+            print(
+                f"{verb} {item.original} from its backup: an earlier removal was "
+                "interrupted before the cleaned copy was swapped in.",
+                file=err,
+            )
+
+
 def _scan(
     args: argparse.Namespace,
     cache: HashCache | None,
@@ -376,17 +398,6 @@ def select_groups(groups: list[DuplicateGroup], wanted: Sequence[str]) -> list[D
             raise _Refusal(f"Group prefix {raw!r} is ambiguous: {ids}")
         chosen[matches[0].gid] = matches[0]
     return list(chosen.values())
-
-
-def split_by_fraction(
-    plans: list[RemovalPlan], max_fraction: float
-) -> tuple[list[RemovalPlan], list[RemovalPlan]]:
-    """Plans within the limit, and those that would take too much of a book."""
-    within, over = [], []
-    for plan in plans:
-        share = len(plan.remove_names) / plan.original_pages if plan.original_pages else 1.0
-        (over if share > max_fraction else within).append(plan)
-    return within, over
 
 
 def _delete_backups(report: RemovalReport) -> tuple[int, int]:
@@ -535,6 +546,10 @@ def _result_json(report: RemovalReport, skipped: list[RemovalPlan]) -> dict[str,
         "bytes_freed": report.total_freed,
         "failed": len(report.failed),
         "cancelled": report.cancelled,
+        "space_shortfall": [
+            {"folder": str(s.folder), "needed": s.needed, "free": s.free}
+            for s in report.space_shortfall
+        ],
         "results": [
             {
                 "archive": str(r.archive),
@@ -608,6 +623,10 @@ def _print_plans(plans: list[RemovalPlan], skipped: list[RemovalPlan],
 def _print_report(
     report: RemovalReport, dry_run: bool, out: TextIO, root: Path | None
 ) -> None:
+    if report.blocked:
+        for shortfall in report.space_shortfall:
+            print(shortfall.describe(), file=out)
+        return
     verb = "Would remove" if dry_run else "Removed"
     freed = "would free" if dry_run else "freed"
     print(
@@ -751,7 +770,7 @@ def _run_clean(
 
     if report.cancelled:
         return EXIT_INTERRUPTED
-    failed = report.failed or any(a.error for a in archives)
+    failed = report.failed or report.blocked or any(a.error for a in archives)
     return EXIT_FAILURES if failed else EXIT_OK
 
 
@@ -843,9 +862,10 @@ def _run_history(
                 )
         return EXIT_OK
 
-    run = next((r for r in runs if r.id == args.run), None)
-    if run is None:
+    chosen = next((r for r in runs if r.id == args.run), None)
+    if chosen is None:
         raise _Refusal(f"No run {args.run}. 'history list' shows the runs.")
+    run = chosen
     items = [i for i in run.items if i.restorable]
     for item in run.items:
         if not item.restorable:
@@ -919,6 +939,8 @@ def main(
     progress = _Progress(err, enabled=not args.quiet)
     try:
         with _Interrupt(err) as interrupt:
+            if args.command == "clean":
+                _recover(args, err)
             archives = _scan(args, cache, progress, lambda: interrupt.requested)
             if interrupt.requested:
                 print("Interrupted during the scan; nothing was changed.", file=err)

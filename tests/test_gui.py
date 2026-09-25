@@ -246,10 +246,148 @@ def test_scan_cannot_start_while_archives_are_being_rewritten(window, library):
         window._removal_worker = None
 
 
+def _library_with_a_duplicated_issue(root: Path) -> Path:
+    """Two books sharing one advert, plus two copies of one issue.
+
+    The copies match each other page for page. The command line skips books
+    that would lose more than a quarter of their pages; the GUI must too.
+    """
+    ad = make_page(seed=9999)
+    for number in (1, 2):
+        story = [make_page(seed=number * 100 + i) for i in range(4)]
+        write_archive(root / f"Book {number:02d}.cbz", [story[0], ad, *story[1:]])
+    issue = [make_page(seed=500 + i) for i in range(4)]
+    write_archive(root / "Issue 1.cbz", issue)
+    write_archive(root / "Issue 1 (copy).cbz", [*issue, make_page(seed=599)])
+    return root
+
+
+def _confirming(monkeypatch, *, dry_run: bool) -> list:
+    """Accept the confirmation, recording what it listed."""
+    from PySide6.QtWidgets import QDialog, QMessageBox
+
+    from comiccleaner.gui.main_window import _ConfirmDialog
+
+    shown: list[_ConfirmDialog] = []
+
+    def accept(self):
+        shown.append(self)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(_ConfirmDialog, "exec", accept)
+    monkeypatch.setattr(_ConfirmDialog, "dry_run", lambda self: dry_run)
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.StandardButton.Ok)
+    return shown
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_books_that_would_lose_too_much_are_skipped_in_the_gui_too(
+    window, tmp_path, monkeypatch, dry_run
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    library = _library_with_a_duplicated_issue(tmp_path / "lib")
+    before = {p.name: p.read_bytes() for p in library.glob("Issue*.cbz")}
+    window.import_paths([library])
+    scan_and_wait(window)
+    window._set_all_decisions(Decision.DELETE)
+    shown = _confirming(monkeypatch, dry_run=dry_run)
+    reports: list[str] = []
+    real_set_text = QMessageBox.setText
+    monkeypatch.setattr(
+        QMessageBox, "setText", lambda self, text: (reports.append(text), real_set_text(self, text))
+    )
+    handed: list[list] = []
+    from comiccleaner.gui import main_window
+
+    real_worker = main_window.RemovalWorker
+    monkeypatch.setattr(
+        main_window, "RemovalWorker",
+        lambda plans, **kw: (handed.append(list(plans)), real_worker(plans, **kw))[1],
+    )
+
+    window.apply_removals()
+    assert pump_until(lambda: window._removal_worker is None), "removal did not finish"
+    assert pump_until(lambda: window._scan_worker is None), "rescan did not finish"
+
+    [dialog] = shown
+    listed = [dialog.skipped_listing.item(i).text() for i in range(dialog.skipped_listing.count())]
+    assert sorted(t.split("  ")[0] for t in listed) == ["Issue 1 (copy).cbz", "Issue 1.cbz"]
+    assert [sorted(p.archive.name for p in plans) for plans in handed] == [
+        ["Book 01.cbz", "Book 02.cbz"]
+    ]
+    assert {p.name: p.read_bytes() for p in library.glob("Issue*.cbz")} == before
+    assert "2 book(s)" in reports[-1] and "25%" in reports[-1]
+    expected = 5 if dry_run else 4
+    assert _page_count(library / "Book 01.cbz") == expected
+
+
+def test_nothing_is_applied_when_every_book_would_lose_too_much(window, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    library = _library_with_a_duplicated_issue(tmp_path / "lib")
+    (library / "Book 01.cbz").unlink()
+    (library / "Book 02.cbz").unlink()
+    window.import_paths([library])
+    scan_and_wait(window)
+    window._set_all_decisions(Decision.DELETE)
+    shown = _confirming(monkeypatch, dry_run=False)
+    told: list[str] = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: told.append(a[2]))
+
+    window.apply_removals()
+
+    assert shown == [] and window._removal_worker is None
+    assert "Issue 1.cbz" in told[0] and "Issue 1 (copy).cbz" in told[0]
+
+
+def test_scan_stays_off_for_the_whole_removal(window, tmp_path, monkeypatch):
+    from comiccleaner.core import remover
+
+    _three_ad_library(tmp_path)
+    window.import_paths([tmp_path])
+    scan_and_wait(window)
+    window._set_all_decisions(Decision.DELETE)
+    assert window.act_scan.isEnabled()
+
+    entered, gate = threading.Event(), threading.Event()
+    real_apply = remover.apply_plan
+
+    def slow_apply(plan, **kwargs):
+        entered.set()
+        gate.wait(20)
+        return real_apply(plan, **kwargs)
+
+    monkeypatch.setattr(remover, "apply_plan", slow_apply)
+    _confirming(monkeypatch, dry_run=False)
+    finished_while_busy: list[bool] = []
+    real_done = window._on_removal_done
+
+    def done(report):
+        real_done(report)
+        # The removal thread has not exited yet, so a scan must still be refused.
+        finished_while_busy.append(window.act_scan.isEnabled())
+
+    monkeypatch.setattr(window, "_on_removal_done", done)
+    window.apply_removals()
+    try:
+        assert pump_until(entered.is_set, 10), "removal never started"
+        assert not window.act_scan.isEnabled()
+    finally:
+        gate.set()
+
+    assert pump_until(lambda: window._removal_worker is None), "removal did not finish"
+    assert finished_while_busy == [False]
+    assert pump_until(lambda: window._scan_worker is None), "rescan did not finish"
+    assert window.act_scan.isEnabled()
+    assert window.act_scan.text() == "Scan"
+
+
 def _three_ad_library(root: Path) -> None:
     ads = [make_page(seed=9000 + i) for i in range(3)]
     for number in range(3):
-        story = [make_page(seed=number * 100 + i) for i in range(3)]
+        # Twelve pages, so the three adverts are exactly the quarter a book may lose.
+        story = [make_page(seed=number * 100 + i) for i in range(9)]
         write_archive(root / f"Book {number}.cbz", [story[0], *ads, *story[1:]])
 
 

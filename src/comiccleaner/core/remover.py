@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import json
 import logging
 import os
 import shutil
 import stat
+import sys
 import tempfile
+import uuid
 import zipfile
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..units import human_bytes
 from .archive import (
     ARCHIVE_SUFFIXES,
     TEMP_PREFIX,
@@ -31,6 +35,15 @@ from .model import ArchiveKind, DuplicateGroup
 log = logging.getLogger(__name__)
 
 ProgressFn = Callable[[int, int, str], None]
+
+# Adverts and credits are a page or three. A plan that would take a large share
+# of a book is far more likely to be two copies of the same issue matching each
+# other page for page, so it is skipped unless the user raises the limit.
+DEFAULT_MAX_FRACTION = 0.25
+
+# Written beside a book for the moment its original has been moved aside and the
+# cleaned copy is not yet in its place; see recover_interrupted.
+MARKER_SUFFIX = ".pending"
 
 
 class RemovalError(RuntimeError):
@@ -54,14 +67,22 @@ class RemovalPlan:
     archive: Path
     remove_names: set[str]
     original_pages: int
-    # sha256 of each marked page as it was scanned. When present, a page whose
-    # bytes no longer match is left alone: another tool may have renumbered or
-    # swapped pages since, and a name alone would then delete the wrong image.
+    # sha256 of each marked page as it was scanned. A page whose bytes no longer
+    # match is left alone: another tool may have renumbered or swapped pages
+    # since, and a name alone would then delete the wrong image. A marked page
+    # with no hash here is never removed, for the same reason.
     expected_sha: dict[str, str] = field(default_factory=dict)
 
     @property
     def remaining_pages(self) -> int:
         return self.original_pages - len(self.remove_names)
+
+    @property
+    def fraction(self) -> float:
+        """Share of the book this plan would remove; unknown length counts as all."""
+        if self.original_pages <= 0:
+            return 1.0
+        return len(self.remove_names) / self.original_pages
 
 
 @dataclass(slots=True)
@@ -81,10 +102,32 @@ class RemovalResult:
 
 
 @dataclass(slots=True)
+class SpaceShortfall:
+    """A volume that cannot hold what a run would write to it."""
+
+    folder: Path
+    needed: int
+    free: int
+
+    def describe(self) -> str:
+        return (
+            f"Not enough free space on {self.folder}: the run needs "
+            f"{human_bytes(self.needed)} and {human_bytes(self.free)} is free "
+            f"(short by {human_bytes(self.needed - self.free)}). Nothing was changed."
+        )
+
+
+@dataclass(slots=True)
 class RemovalReport:
     results: list[RemovalResult] = field(default_factory=list)
     # Stopped early at the user's request; plans after the last result never ran.
     cancelled: bool = False
+    # Set when the run was refused before its first book for want of disk space.
+    space_shortfall: list[SpaceShortfall] = field(default_factory=list)
+
+    @property
+    def blocked(self) -> bool:
+        return bool(self.space_shortfall)
 
     @property
     def succeeded(self) -> list[RemovalResult]:
@@ -125,6 +168,21 @@ def build_plans(
     return plans
 
 
+def split_by_fraction(
+    plans: Iterable[RemovalPlan], max_fraction: float = DEFAULT_MAX_FRACTION
+) -> tuple[list[RemovalPlan], list[RemovalPlan]]:
+    """Plans within the limit, and those that would take too much of a book.
+
+    The limit is inclusive: exactly `max_fraction` of a book may go. The GUI and
+    the command line both apply this before anything is rewritten.
+    """
+    within: list[RemovalPlan] = []
+    over: list[RemovalPlan] = []
+    for plan in plans:
+        (over if plan.fraction > max_fraction else within).append(plan)
+    return within, over
+
+
 def is_backup_name(name: str, suffix: str = ".bak") -> bool:
     """True if `name` is a backup this app could have made.
 
@@ -156,6 +214,42 @@ def _backup_path(archive: Path, policy: BackupPolicy) -> Path:
     return candidate
 
 
+def _existing(path: Path) -> Path:
+    """`path`, or its nearest ancestor that exists (a folder not yet created)."""
+    path = Path(os.path.abspath(path))
+    while not path.exists() and path.parent != path:
+        path = path.parent
+    return path
+
+
+def _volume(path: Path) -> tuple[int, Path]:
+    """An id for the volume holding `path`, and a folder on it that exists."""
+    anchor = _existing(path)
+    return anchor.stat().st_dev, anchor
+
+
+def on_same_volume(a: Path, b: Path) -> bool:
+    """True if moving between `a` and `b` is a rename rather than a copy."""
+    try:
+        return _volume(a)[0] == _volume(b)[0]
+    except OSError:
+        return True  # cannot tell; assume the cheap case rather than warn wrongly
+
+
+def _require_free_space(folder: Path, needed: int, name: str) -> None:
+    """Refuse to start a copy the destination volume cannot finish."""
+    try:
+        free = shutil.disk_usage(_existing(folder)).free
+    except OSError as exc:
+        log.debug("could not read free space on %s: %s", folder, exc)
+        return
+    if free < needed:
+        raise RemovalError(
+            f"not enough free space on {folder} to copy {name} there: it needs "
+            f"{human_bytes(needed)} and {human_bytes(free)} is free"
+        )
+
+
 def _move_aside(src: Path, dst: Path) -> None:
     """Move `src` to `dst`, preferring an atomic rename.
 
@@ -171,12 +265,213 @@ def _move_aside(src: Path, dst: Path) -> None:
         cross_volume = exc.errno == errno.EXDEV or getattr(exc, "winerror", 0) == 17
         if not cross_volume:
             raise
+    # A copy is a full second file until the source is deleted, so a volume that
+    # cannot hold it is refused here rather than failing half way through.
+    _require_free_space(dst.parent, src.stat().st_size, src.name)
     shutil.copy2(src, dst)
     try:
         src.unlink()
     except OSError:
         dst.unlink(missing_ok=True)  # do not leave an orphaned partial backup
         raise
+
+
+def _write_marker(original: Path, destination: Path, backup: Path, temp: Path) -> Path:
+    """Note, beside the book, that its original is about to be moved aside.
+
+    If the process dies before the cleaned copy is swapped in, the book exists
+    only as its backup; this note is what lets recover_interrupted put it back.
+    """
+    marker = destination.parent / f"{TEMP_PREFIX}{uuid.uuid4().hex}{MARKER_SUFFIX}"
+    note = {
+        "original": str(original),
+        "destination": str(destination),
+        "backup": str(backup),
+        "temp": str(temp),
+        "pid": os.getpid(),
+    }
+    marker.write_text(json.dumps(note), encoding="utf-8")
+    return marker
+
+
+def _drop_marker(marker: Path | None) -> None:
+    if marker is None:
+        return
+    try:
+        marker.unlink(missing_ok=True)
+    except OSError as exc:
+        # Harmless: the next recovery finds the book in place and clears it.
+        log.warning("could not remove %s: %s", marker, exc)
+
+
+def _process_alive(pid: int) -> bool:
+    """True if `pid` is a running process, whose removal may still be under way."""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # access denied: it exists
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)  # signal 0 only asks; never do this on Windows, where it kills
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+@dataclass(slots=True)
+class Recovered:
+    """A removal that was interrupted between moving the original and the swap."""
+
+    original: Path
+    backup: Path
+    # True if the book was put back from its backup; False if it was already in
+    # place and only the leftover note was cleared.
+    restored: bool
+
+
+def recover_interrupted(paths: Iterable[Path], *, dry_run: bool = False) -> list[Recovered]:
+    """Put back books a killed run left only as a backup.
+
+    Folders in `paths` are searched recursively, like find_archives; for any
+    other path (a book, even one that is now missing) its folder is looked in.
+    Only books with a note from apply_plan are touched, so a book deleted on
+    purpose never comes back from its .bak.
+    """
+    folders: dict[Path, bool] = {}
+    for raw in paths:
+        path = Path(raw)
+        if path.is_dir():
+            folders[path] = True
+        else:
+            folders.setdefault(path.parent, False)
+    pattern = f"{TEMP_PREFIX}*{MARKER_SUFFIX}"
+    markers: set[Path] = set()
+    for folder, recursive in folders.items():
+        try:
+            found = folder.rglob(pattern) if recursive else folder.glob(pattern)
+            markers.update(m.resolve() for m in found if m.is_file())
+        except OSError as exc:
+            log.debug("could not look for removal notes in %s: %s", folder, exc)
+    recovered = []
+    for marker in sorted(markers):
+        outcome = _recover_one(marker, dry_run=dry_run)
+        if outcome is not None:
+            recovered.append(outcome)
+    return recovered
+
+
+def _recover_one(marker: Path, *, dry_run: bool) -> Recovered | None:
+    try:
+        note = json.loads(marker.read_text(encoding="utf-8"))
+        original = Path(note["original"])
+        destination = Path(note["destination"])
+        backup = Path(note["backup"])
+        temp = Path(note["temp"])
+        pid = int(note.get("pid", 0))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        log.warning("ignoring unreadable removal note %s: %s", marker, exc)
+        return None
+    if _process_alive(pid):
+        return None  # a removal still running in another window or shell
+    # Only ever delete a temp file this app named, whatever the note says.
+    own_temp = temp.name.startswith(TEMP_PREFIX) and temp != destination
+
+    if destination.exists() or original.exists():
+        # The swap finished, or the original never left: the book is in place and
+        # only the note was missed. Both files stay; an unswapped temp is junk.
+        if not dry_run:
+            if own_temp:
+                _discard(temp)
+            _drop_marker(marker)
+        return Recovered(original=original, backup=backup, restored=False)
+
+    if not backup.exists():
+        log.warning(
+            "%s is missing and so is its backup %s; leaving %s for inspection",
+            original, backup, marker,
+        )
+        return None
+    if not dry_run:
+        try:
+            _move_aside(backup, original)
+        except (OSError, RemovalError) as exc:
+            log.warning("could not put %s back from %s: %s", original, backup, exc)
+            return None  # the note stays, so the next start tries again
+        if own_temp:
+            _discard(temp)
+        _drop_marker(marker)
+        log.info("restored %s from %s after an interrupted removal", original, backup)
+    return Recovered(original=original, backup=backup, restored=True)
+
+
+def check_free_space(
+    plans: Iterable[RemovalPlan],
+    *,
+    backup: BackupPolicy | None = None,
+    output_dir: Path | None = None,
+) -> list[SpaceShortfall]:
+    """Volumes that cannot hold what these plans would write.
+
+    Each book is counted at its current size, the most its cleaned copy can
+    take. What stays on disk adds up: cleaned copies in an output folder, and
+    backups (a rename on the book's own volume, but then the original is kept as
+    well as the cleaned copy). What does not: with no backup, or a backup on
+    another volume, each temp file replaces its book, so that volume only needs
+    room for the largest one at a time.
+    """
+    policy = backup or BackupPolicy()
+    anchors: dict[int, Path] = {}
+    kept: dict[int, int] = {}
+    transient: dict[int, int] = {}
+
+    def volume_of(folder: Path) -> int:
+        dev, anchor = _volume(folder)
+        anchors.setdefault(dev, anchor)
+        return dev
+
+    for plan in plans:
+        try:
+            size = plan.archive.stat().st_size
+            if output_dir is not None:
+                out = volume_of(output_dir)
+                kept[out] = kept.get(out, 0) + size
+                continue
+            book = volume_of(plan.archive.parent)
+            if policy.enabled:
+                target = volume_of(policy.directory or plan.archive.parent)
+                kept[target] = kept.get(target, 0) + size
+                if target == book:
+                    continue
+            transient[book] = max(transient.get(book, 0), size)
+        except OSError:
+            continue  # a missing book fails on its own when its turn comes
+
+    shortfalls = []
+    for dev, anchor in anchors.items():
+        needed = kept.get(dev, 0) + transient.get(dev, 0)
+        try:
+            free = shutil.disk_usage(anchor).free
+        except OSError as exc:
+            log.debug("could not read free space on %s: %s", anchor, exc)
+            continue
+        if free < needed:
+            shortfalls.append(SpaceShortfall(folder=anchor, needed=needed, free=free))
+    return shortfalls
 
 
 def _mode_of(path: Path) -> int | None:
@@ -235,49 +530,76 @@ def _verify_cbz(path: Path, expected_pages: int) -> None:
         raise RemovalError(f"rebuilt archive has {actual} pages, expected {expected_pages}")
 
 
-def _collect_entries(
-    plan: RemovalPlan,
-) -> tuple[list[tuple[str, bytes]], set[str], int, int]:
-    """Read the archive and return the entries to keep, plus removal stats."""
-    with ComicArchive(plan.archive) as arc:
-        all_names = arc.entry_names()
-        page_names = arc.page_names()
-        removing = {n for n in page_names if n in plan.remove_names}
+@dataclass(slots=True)
+class _Checked:
+    """What a plan will do to an archive, once it has been checked against it."""
 
-        missing = plan.remove_names - set(page_names)
-        if missing:
+    names: list[str]  # every entry, in archive order
+    removing: set[str]
+    removed_indices: set[int]
+    remaining: int
+    freed: int
+    comicinfo: str | None
+
+
+def _check_plan(arc: ComicArchive, plan: RemovalPlan) -> _Checked:
+    """Confirm the marked pages are still the ones that were scanned.
+
+    Raises RemovalError, removing nothing, if the archive changed, a marked page
+    cannot be identified, or every page would go.
+    """
+    all_names = arc.entry_names()
+    page_names = arc.page_names()
+    removing = {n for n in page_names if n in plan.remove_names}
+
+    missing = plan.remove_names - set(page_names)
+    if missing:
+        raise RemovalError(
+            f"archive changed since scan; {len(missing)} marked page(s) not found"
+        )
+    unverifiable = sorted(n for n in removing if not plan.expected_sha.get(n))
+    if unverifiable:
+        raise RemovalError(
+            f"no scanned fingerprint for {unverifiable[0]}, so it cannot be confirmed "
+            "as the page that was marked; nothing was removed"
+        )
+    for name in sorted(removing):
+        if content_digest(arc.read(name)) != plan.expected_sha[name]:
             raise RemovalError(
-                f"archive changed since scan; {len(missing)} marked page(s) not found"
+                f"archive changed since scan; {name} no longer matches the page "
+                "that was marked, so nothing was removed"
             )
-        if not removing:
-            return [], set(), 0, len(page_names)
-        for name in removing:
-            expected = plan.expected_sha.get(name)
-            if expected and content_digest(arc.read(name)) != expected:
-                raise RemovalError(
-                    f"archive changed since scan; {name} no longer matches the page "
-                    "that was marked, so nothing was removed"
-                )
-        if len(removing) >= len(page_names):
-            raise RemovalError(
-                "refusing to remove every page - this would empty the archive"
-            )
+    if removing and len(removing) >= len(page_names):
+        raise RemovalError(
+            "refusing to remove every page - this would empty the archive"
+        )
 
-        removed_indices = {i for i, n in enumerate(page_names) if n in removing}
-        freed = sum(arc.stored_size(n) for n in removing)
-        comicinfo_name = find_comicinfo(all_names)
-        remaining = len(page_names) - len(removing)
+    return _Checked(
+        names=all_names,
+        removing=removing,
+        removed_indices={i for i, n in enumerate(page_names) if n in removing},
+        remaining=len(page_names) - len(removing),
+        freed=sum(arc.stored_size(n) for n in removing),
+        comicinfo=find_comicinfo(all_names),
+    )
 
-        entries: list[tuple[str, bytes]] = []
-        for name in all_names:
-            if name in removing:
-                continue
-            data = arc.read(name)
-            if comicinfo_name is not None and name == comicinfo_name:
-                data = update_comicinfo(data, removed_indices, remaining)
-            entries.append((name, data))
 
-    return entries, removing, freed, len(page_names)
+def _rebuild(arc: ComicArchive, dest: Path, checked: _Checked, *, compress: bool) -> None:
+    """Write the archive minus the removed pages, streaming every other entry."""
+    replace: dict[str, bytes] = {}
+    if checked.comicinfo is not None:
+        replace[checked.comicinfo] = update_comicinfo(
+            arc.read(checked.comicinfo), checked.removed_indices, checked.remaining
+        )
+    keep = [n for n in checked.names if n not in checked.removing]
+    write_cbz(dest, arc, keep, replace=replace, compress=compress)
+
+
+def _failed(result: RemovalResult, error: str) -> RemovalResult:
+    result.error = error
+    result.removed = 0
+    result.bytes_freed = 0
+    return result
 
 
 def apply_plan(
@@ -290,7 +612,7 @@ def apply_plan(
 ) -> RemovalResult:
     """Rebuild one archive without its marked pages.
 
-    The new file is written to a temp path and verified before the original is
+    The new file is streamed to a temp path and verified before the original is
     moved aside, so an interrupted or failed run never destroys the source.
     """
     policy = backup or BackupPolicy()
@@ -300,67 +622,73 @@ def apply_plan(
         result.skipped = True
         return result
 
-    try:
-        entries, removing, freed, total_pages = _collect_entries(plan)
-    except (ArchiveError, RemovalError) as exc:
-        result.error = str(exc)
-        return result
-    except OSError as exc:
-        result.error = f"read failed: {exc}"
-        return result
-
-    if not removing:
-        result.skipped = True
-        return result
-
-    result.removed = len(removing)
-    result.bytes_freed = freed
-    expected_pages = total_pages - len(removing)
-
     # cbr/cb7 cannot be written back; they are rebuilt as a sibling .cbz.
-    result.converted = detect_kind(plan.archive) in (
-        ArchiveKind.RAR,
-        ArchiveKind.SEVENZIP,
-    )
+    converted = detect_kind(plan.archive) in (ArchiveKind.RAR, ArchiveKind.SEVENZIP)
     destination = output_dir / plan.archive.name if output_dir is not None else plan.archive
-    if result.converted:
+    if converted:
         destination = destination.with_suffix(".cbz")
-    result.output = destination
-
-    # The one destination we may write over is the archive itself, and only when
-    # replacing in place (that path takes a backup). Anything else that exists is
-    # a different file: a cleaned copy from an earlier run, the output folder being
-    # the source folder, or book.cbz sitting next to the book.cbr being converted.
-    # Checked before the dry-run exit so a dry run reports the same refusal.
     replacing_in_place = output_dir is None
-    if destination.exists() and not (replacing_in_place and destination == plan.archive):
-        result.error = f"refusing to overwrite existing file: {destination.name}"
-        result.removed = 0
-        result.bytes_freed = 0
-        return result
 
-    if dry_run:
-        return result
+    # The source stays open only while it is checked and copied: Windows will not
+    # let it be moved aside for the backup while a handle is still alive.
+    tmp_path: Path | None = None
+    marker: Path | None = None
+    try:
+        with ComicArchive(plan.archive) as arc:
+            checked = _check_plan(arc, plan)
+            if not checked.removing:
+                result.skipped = True
+                return result
+            result.removed = len(checked.removing)
+            result.bytes_freed = checked.freed
+            result.converted = converted
+            result.output = destination
+
+            # The one destination we may write over is the archive itself, and only
+            # when replacing in place (that path takes a backup). Anything else that
+            # exists is a different file: a cleaned copy from an earlier run, the
+            # output folder being the source folder, or book.cbz sitting next to the
+            # book.cbr being converted. Checked before the dry-run exit so a dry run
+            # reports the same refusal.
+            if destination.exists() and not (
+                replacing_in_place and destination == plan.archive
+            ):
+                return _failed(
+                    result, f"refusing to overwrite existing file: {destination.name}"
+                )
+            if dry_run:
+                return result
+
+            # Folders are only created once we are really writing, so a dry run
+            # leaves no trace, and an unusable destination is reported plainly.
+            try:
+                if output_dir is not None:
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                tmp_fd, tmp_name = tempfile.mkstemp(
+                    dir=str(destination.parent), prefix=TEMP_PREFIX, suffix=".cbz"
+                )
+            except OSError as exc:
+                return _failed(
+                    result,
+                    f"cannot write to {destination.parent}: {_explain(exc, destination)}",
+                )
+            os.close(tmp_fd)
+            tmp_path = Path(tmp_name)
+            _rebuild(arc, tmp_path, checked, compress=compress)
+    except (ArchiveError, RemovalError) as exc:
+        if tmp_path is not None:
+            _discard(tmp_path)
+        return _failed(result, str(exc))
+    except (OSError, zipfile.BadZipFile) as exc:
+        if tmp_path is None:
+            return _failed(result, f"read failed: {exc}")
+        _discard(tmp_path)
+        message = _explain(exc, plan.archive) if isinstance(exc, OSError) else str(exc)
+        return _failed(result, message)
 
     original_mode = _mode_of(plan.archive)
-    # Folders are only created once we are really writing, so a dry run leaves no
-    # trace, and an unusable destination is reported plainly rather than escaping.
     try:
-        if output_dir is not None:
-            output_dir.mkdir(parents=True, exist_ok=True)
-        tmp_fd, tmp_name = tempfile.mkstemp(
-            dir=str(destination.parent), prefix=TEMP_PREFIX, suffix=".cbz"
-        )
-    except OSError as exc:
-        result.error = f"cannot write to {destination.parent}: {_explain(exc, destination)}"
-        result.removed = 0
-        result.bytes_freed = 0
-        return result
-    os.close(tmp_fd)
-    tmp_path = Path(tmp_name)
-    try:
-        write_cbz(tmp_path, entries, compress=compress)
-        _verify_cbz(tmp_path, expected_pages)
+        _verify_cbz(tmp_path, checked.remaining)
 
         # Converting cbr to cbz with no backup: the source must still go, but only
         # once the replacement is in place - otherwise a failed rename loses both.
@@ -368,6 +696,7 @@ def apply_plan(
         if replacing_in_place and plan.archive.exists():
             if policy.enabled:
                 backup_target = _backup_path(plan.archive, policy)
+                marker = _write_marker(plan.archive, destination, backup_target, tmp_path)
                 _move_aside(plan.archive, backup_target)
                 result.backup = backup_target
             else:
@@ -375,6 +704,7 @@ def apply_plan(
 
         _apply_mode(tmp_path, original_mode)
         os.replace(tmp_path, destination)
+        _drop_marker(marker)
         if drop_source:
             try:
                 plan.archive.unlink()
@@ -387,11 +717,12 @@ def apply_plan(
         if result.backup is not None and not plan.archive.exists():
             _move_aside(result.backup, plan.archive)
             result.backup = None
-        result.error = (
-            _explain(exc, plan.archive) if isinstance(exc, OSError) else str(exc)
+        # Not reached if putting it back failed: the note then lets the next
+        # start finish the job.
+        _drop_marker(marker)
+        _failed(
+            result, _explain(exc, plan.archive) if isinstance(exc, OSError) else str(exc)
         )
-        result.removed = 0
-        result.bytes_freed = 0
     return result
 
 
@@ -416,6 +747,11 @@ def apply_removals(
     """Apply every plan in turn. Disk-bound, so there is no thread pool here."""
     todo = list(plans)
     report = RemovalReport()
+    # Checked before the first book, dry run or not, so a run that cannot finish
+    # never starts and a dry run reports exactly what a real one would.
+    report.space_shortfall = check_free_space(todo, backup=backup, output_dir=output_dir)
+    if report.space_shortfall:
+        return report
     # Cleaned copies keep their folder layout under the output folder. Flattening
     # them would make two series that both have a "Vol 01.cbz" collide, and the
     # second would be refused.

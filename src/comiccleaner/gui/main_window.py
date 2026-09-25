@@ -3,19 +3,25 @@
 from __future__ import annotations
 
 import contextlib
+import enum
+import html
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer, QUrl, Slot
 from PySide6.QtGui import (
     QAction,
     QBrush,
+    QCloseEvent,
     QColor,
     QDesktopServices,
     QDragEnterEvent,
     QDropEvent,
+    QGuiApplication,
     QKeySequence,
     QPalette,
+    QPixmap,
     QShortcut,
 )
 from PySide6.QtWidgets import (
@@ -63,18 +69,34 @@ from ..core.model import (
     MatchKind,
     PageEntry,
 )
-from ..core.remover import build_plans, is_backup_name
+from ..core.remover import (
+    DEFAULT_MAX_FRACTION,
+    RemovalPlan,
+    RemovalReport,
+    build_plans,
+    is_backup_name,
+    on_same_volume,
+    recover_interrupted,
+    split_by_fraction,
+)
 from ..core.scanner import find_archives
-from ..core.updates import is_newer
+from ..core.updates import Release, is_newer
 from ..resources import app_icon
 from ..units import human_bytes
 from .about import AboutDialog
 from .history import HistoryDialog
 from .preview import PagePreviewDialog, page_distance
 from .remembered import RememberedDialog
-from .session import SESSION_FILE, SavedDecision, Session, load_session, save_session
+from .session import (
+    SESSION_FILE,
+    SavedDecision,
+    Session,
+    carry_decisions,
+    load_session,
+    save_session,
+)
 from .settings import AppSettings, SettingsDialog, cache_path
-from .theme import apply_theme, colour
+from .theme import Theme, apply_theme, colour
 from .thumbs import THUMB_SIZE, ThumbnailCache
 from .welcome import WelcomePanel
 from .workers import RemovalWorker, ScanWorker, UpdateChecker
@@ -84,6 +106,10 @@ log = logging.getLogger(__name__)
 ROLE_GID = Qt.ItemDataRole.UserRole + 1
 ROLE_PAGE_KEY = Qt.ItemDataRole.UserRole + 2
 ROLE_THUMB_KEY = Qt.ItemDataRole.UserRole + 3
+
+# How long closing waits for a scan or removal to reach a safe stopping point
+# before giving up on this attempt; it closes by itself once they are done.
+CLOSE_WAIT_MS = 4000
 
 # The three columns share these so their list areas start and end together.
 PANEL_HEADER_HEIGHT = 30
@@ -128,6 +154,8 @@ class MainWindow(QMainWindow):
         self._removal_worker: RemovalWorker | None = None
         self._removal_was_dry_run = False
         self._removal_total = 0
+        # Books the last Apply left alone for losing too much; see apply_removals.
+        self._skipped_plans: list[RemovalPlan] = []
         # Books a finished removal rewrote, scanned again once its thread exits.
         self._pending_rescan: list[Path] = []
         self._sort_key = "books"
@@ -142,9 +170,10 @@ class MainWindow(QMainWindow):
 
         # Kept beside the hash cache, so anything that relocates one moves both.
         self._session_file = db_path.with_name(SESSION_FILE)
-        # Decisions from the last session whose groups have not been rebuilt yet.
+        # Decisions from the last session still waiting for their books to be scanned.
         self._restored: dict[str, SavedDecision] = {}
-        # Shown once the restore scan ends; the scan's own messages would bury it.
+        # Shown once the next scan ends (restoring the last session, or books put
+        # back from History); the scan's own messages would bury it.
         self._startup_note = ""
         self._session_timer = QTimer(self)
         self._session_timer.setSingleShot(True)
@@ -153,11 +182,18 @@ class MainWindow(QMainWindow):
         # Set once the window starts closing. A worker's result can already be
         # queued by then, and must not land on a cache that has been shut.
         self._closing = False
+        # Workers a deferred close is waiting on; see closeEvent.
+        self._close_hooked: list[object] = []
         self._update_checker: UpdateChecker | None = None
 
         self._build_ui()
         self._restyle()
         self._refresh_status()
+
+        # "Follow system" follows the OS while running, not just at launch.
+        hints = QGuiApplication.styleHints()
+        if hasattr(hints, "colorSchemeChanged"):  # Qt 6.5+
+            hints.colorSchemeChanged.connect(self._on_system_colour_scheme_changed)
 
     # -- construction ------------------------------------------------------
     def _build_ui(self) -> None:
@@ -182,10 +218,12 @@ class MainWindow(QMainWindow):
         self.views.addWidget(self.review)
 
         central = QWidget()
+        self._central = central
         layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self._build_tools_banner())
+        layout.addWidget(self._build_missing_banner())
         layout.addWidget(self.views, 1)
         self.setCentralWidget(central)
 
@@ -304,14 +342,14 @@ class MainWindow(QMainWindow):
 
     def _panel(
         self, title: str, header_extra: QWidget | None, body: QWidget, footer: QWidget
-    ) -> QWidget:
+    ) -> _Panel:
         """One column of the main view.
 
         Every column is built the same way - a fixed-height header, the list
         itself, then a fixed-height footer - so the three list areas line up
         across the window instead of each starting at its own height.
         """
-        panel = QWidget()
+        panel = _Panel()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
@@ -353,11 +391,10 @@ class MainWindow(QMainWindow):
         )
         self.archive_list.setAlternatingRowColors(True)
         # Scoped to the list: Delete elsewhere must never drop books from the library.
-        QShortcut(
+        _widget_shortcut(
             QKeySequence(QKeySequence.StandardKey.Delete),
             self.archive_list,
             self.remove_selected_archives,
-            context=Qt.ShortcutContext.WidgetShortcut,
         )
 
         # Selecting books narrows the groups to the ones they contain.
@@ -447,24 +484,37 @@ class MainWindow(QMainWindow):
         # Double-click or Enter opens the page at full size.
         self.page_list.itemActivated.connect(self._preview_item)
 
-        # Single keys, so a long review can be driven from the keyboard. Each one
-        # moves on to the next group still waiting for a decision.
         self.btn_delete = QPushButton("Remove this page everywhere")
-        self.btn_delete.setShortcut("D")
         self.btn_delete.setToolTip("Remove every ticked copy, then go to the next group (D)")
         self.btn_delete.clicked.connect(lambda: self._set_current_decision(Decision.DELETE))
         self.btn_keep = QPushButton("Keep")
-        self.btn_keep.setShortcut("K")
         self.btn_keep.setToolTip("Keep every copy, then go to the next group (K)")
         self.btn_keep.clicked.connect(lambda: self._set_current_decision(Decision.KEEP))
         self.btn_ignore = QPushButton("Ignore")
-        self.btn_ignore.setShortcut("I")
         self.btn_ignore.setToolTip(
             "Hide this page from future scans (I). Undo it from Remembered Pages."
         )
         self.btn_ignore.clicked.connect(self._ignore_current)
         for button in (self.btn_delete, self.btn_keep, self.btn_ignore):
             button.setEnabled(False)
+
+        # Single keys, so a long review can be driven from the keyboard. Each one
+        # moves on to the next group still waiting for a decision. Like Delete on
+        # the library they are scoped: to the review lists and these buttons. A
+        # window-wide letter could also fire while typing in Filter books or in a
+        # drop-down, and mark a group nobody meant to touch.
+        self.decision_keys = {"D": self.btn_delete, "K": self.btn_keep, "I": self.btn_ignore}
+        for key, button in self.decision_keys.items():
+            for widget in (self.group_list, self.page_list, *self.decision_keys.values()):
+                _widget_shortcut(QKeySequence(key), widget, button.click)
+        # Space ticks and Enter opens the selected copy from anywhere in the review,
+        # scoped the same way so Filter books and the drop-downs keep both keys. Not
+        # on the page grid: it already ticks on Space and opens on Enter, and a
+        # second binding there would toggle the copy twice, changing nothing.
+        for widget in (self.group_list, *self.decision_keys.values()):
+            _widget_shortcut(QKeySequence("Space"), widget, self._toggle_selected_copy)
+            for key in ("Return", "Enter"):
+                _widget_shortcut(QKeySequence(key), widget, self._open_selected_copy)
 
         self.detail_hint = QLabel(
             "Ticked copies are removed. Double-click a page to see it full size."
@@ -512,6 +562,39 @@ class MainWindow(QMainWindow):
         # comes back only if more are imported.
         self._banner_dismissed_at = 0
         return banner
+
+    def _build_missing_banner(self) -> QFrame:
+        """Names the books from last session that are gone, until dismissed."""
+        banner = QFrame()
+        banner.setObjectName("missingBanner")
+        row = QHBoxLayout(banner)
+        row.setContentsMargins(10, 6, 10, 6)
+        self.missing_banner_text = QLabel()
+        self.missing_banner_text.setWordWrap(True)
+        self.missing_banner_text.setTextFormat(Qt.TextFormat.RichText)
+        dismiss = QPushButton("Dismiss")
+        dismiss.clicked.connect(self._dismiss_missing_banner)
+        row.addWidget(self.missing_banner_text, 1)
+        row.addWidget(dismiss)
+        banner.setVisible(False)
+        self.missing_banner = banner
+        return banner
+
+    def _show_missing_banner(self, missing: list[Path], limit: int = 10) -> None:
+        names = ", ".join(html.escape(p.name) for p in missing[:limit])
+        if len(missing) > limit:
+            names += f", and {len(missing) - limit} more"
+        self.missing_banner_text.setText(
+            f"<b>{len(missing)} book(s) from last time could not be found:</b> {names}. "
+            "They may have been moved, renamed or deleted; add them again from where "
+            "they are now."
+        )
+        self.missing_banner.setToolTip("\n".join(str(p) for p in missing))
+        self.missing_banner.setVisible(True)
+
+    @Slot()
+    def _dismiss_missing_banner(self) -> None:
+        self.missing_banner.setVisible(False)
 
     def _books_needing_a_tool(self) -> list[ArchiveInfo]:
         return [
@@ -612,6 +695,11 @@ class MainWindow(QMainWindow):
         self._session_changed()
         if not discovered:
             self.status_label.setText("Nothing importable in that drop.")
+        elif not added:
+            self.status_label.setText(
+                f"Already in the library: {len(discovered)} archive(s). "
+                "Nothing new to import."
+            )
         else:
             self.status_label.setText(
                 f"Imported {added} new archive(s). Press Scan to hash their pages."
@@ -633,7 +721,7 @@ class MainWindow(QMainWindow):
         if self._scan_worker is not None:
             self._scan_worker.cancel()
             return
-        if self._removal_worker is not None:
+        if self._job is _Job.REMOVING:
             return  # archives are being rewritten; hashing them now would race it
         if not self.archives:
             QMessageBox.information(self, "Nothing to scan", "Import some archives first.")
@@ -641,14 +729,13 @@ class MainWindow(QMainWindow):
         self._run_scan(list(self.archives))
 
     def _run_scan(self, paths: list[Path]) -> None:
-        self._set_busy(True, "Scanning")
-        self.act_scan.setText("Cancel Scan")
         worker = ScanWorker(paths, self.cache, self)
         worker.progressed.connect(self._on_scan_progress)
         worker.finished_scan.connect(self._on_scan_done)
         worker.failed.connect(self._on_worker_failed)
         worker.finished.connect(self._on_scan_thread_finished)
         self._scan_worker = worker
+        self._job_changed("Scanning")
         worker.start()
 
     @Slot(int, int, str)
@@ -687,22 +774,26 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_scan_thread_finished(self) -> None:
         self._scan_worker = None
-        self.act_scan.setText("Scan")
-        self._set_busy(False)
-        self._refresh_status()
+        self._job_changed()
         if self._startup_note:
             self.status_label.setText(f"{self._startup_note} {self.status_label.text()}")
             self._startup_note = ""
 
     @Slot(str)
     def _on_worker_failed(self, message: str) -> None:
+        if self._closing:
+            return  # the crash report is already on disk; no dialogs while quitting
         QMessageBox.critical(self, "Something went wrong", message)
 
     # -- grouping ----------------------------------------------------------
     def rebuild_groups(self) -> None:
         """Re-cluster from already-hashed pages. No disk access, so it is instant."""
         scanned = [a for a in self.archives.values() if a.pages]
-        previous = {g.gid: g for g in self.groups}
+        # Decisions already made, last session's first so this session's win.
+        prior = dict(self._restored)
+        for group in self.groups:
+            if group.decision is not Decision.UNDECIDED or group.kept:
+                prior[group.gid] = _saved(group)
 
         self.groups = build_groups(
             scanned,
@@ -710,22 +801,34 @@ class MainWindow(QMainWindow):
             ignored=self.cache.ignored_hashes(),
             known=self.cache.known_hashes() if self.settings.remember_junk else None,
         )
-        # Carry over decisions the user already made, this session or the last.
+        # Carry them over, following the pages when a group's id has changed.
+        carried, used = carry_decisions(prior, self.groups)
         for group in self.groups:
-            old = previous.get(group.gid)
-            restored = self._restored.pop(group.gid, None)
-            source = old if old is not None else restored
+            source = carried.get(group.gid)
             if source is not None:
                 group.decision = source.decision
                 group.kept = {k for k in source.kept if k in {p.key for p in group.pages}}
             elif group.known:
                 # Removed before, so marked again; Apply still asks first.
                 group.decision = Decision.DELETE
+        # A saved decision that matched nothing is dropped, unless some of its
+        # books are yet to be scanned and it may still find its group.
+        self._restored = {
+            gid: saved for gid, saved in self._restored.items()
+            if gid not in used and self._awaiting_scan(saved)
+        }
 
         self.groups = sort_groups(self.groups, self._sort_key)
         self._refresh_group_list()
         self._refresh_status()
         self._update_library_texts()
+
+    def _awaiting_scan(self, saved: SavedDecision) -> bool:
+        for archive in {Path(a) for a, _ in saved.pages}:
+            info = self.archives.get(archive)
+            if info is not None and not info.pages and not info.error:
+                return True
+        return False
 
     @Slot(int)
     def _on_sort_changed(self, index: int) -> None:
@@ -781,13 +884,14 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, str(path))
             item.setToolTip(self._archive_tooltip(info, stats.get(path)))
             if info.error:
-                item.setForeground(QBrush(QColor("#c0392b")))
+                item.setForeground(QBrush(colour("delete")))
             self.archive_list.addItem(item)
             item.setSelected(path in selected)
         self.archive_list.blockSignals(False)
         self._apply_library_search()
 
-        still_there = {p for p in selected if p in self.archives}
+        # The search may already have dropped hidden books from the selection.
+        still_there = {p for p in self._library_selection if p in self.archives}
         if still_there != self._library_selection:
             self._library_selection = still_there
             self._refresh_group_list()
@@ -894,9 +998,19 @@ class MainWindow(QMainWindow):
     @Slot()
     def _apply_library_search(self) -> None:
         needle = self.library_search.text().strip().lower()
+        deselected = False
+        self.archive_list.blockSignals(True)
         for row in range(self.archive_list.count()):
             item = self.archive_list.item(row)
-            item.setHidden(bool(needle) and needle not in item.text().lower())
+            hidden = bool(needle) and needle not in item.text().lower()
+            item.setHidden(hidden)
+            # A book you cannot see must not go on narrowing the groups.
+            if hidden and item.isSelected():
+                item.setSelected(False)
+                deselected = True
+        self.archive_list.blockSignals(False)
+        if deselected:
+            self._on_library_selection()
 
     @Slot(int)
     def _on_filter_changed(self, index: int) -> None:
@@ -998,15 +1112,22 @@ class MainWindow(QMainWindow):
             button.setEnabled(False)
 
     @Slot(str, object)
-    def _on_thumb_ready(self, key: str, pixmap: object) -> None:
+    def _on_thumb_ready(self, key: str, pixmap: QPixmap) -> None:
         from PySide6.QtGui import QIcon
 
         icon = QIcon(pixmap)
         for widget in (self.group_list, self.page_list):
-            for row in range(widget.count()):
-                item = widget.item(row)
-                if item.data(ROLE_THUMB_KEY) == key:
-                    item.setIcon(icon)
+            # A new icon is an itemChanged too, and on the page grid that would
+            # read the grid's tick back into the group: a copy just unticked in
+            # the preview, behind a grid not yet refreshed, came back ticked.
+            widget.blockSignals(True)
+            try:
+                for row in range(widget.count()):
+                    item = widget.item(row)
+                    if item.data(ROLE_THUMB_KEY) == key:
+                        item.setIcon(icon)
+            finally:
+                widget.blockSignals(False)
 
     # -- decisions ---------------------------------------------------------
     def _set_current_decision(self, decision: Decision) -> None:
@@ -1089,6 +1210,29 @@ class MainWindow(QMainWindow):
                 "Every group has a decision. Apply Removals when you are ready."
             )
 
+    def _selected_copy(self) -> QListWidgetItem | None:
+        """The copy Space and Enter act on: the grid's current one, else the first."""
+        item = self.page_list.currentItem()
+        if item is None and self.page_list.count():
+            item = self.page_list.item(0)
+            self.page_list.setCurrentItem(item)
+        return item
+
+    @Slot()
+    def _toggle_selected_copy(self) -> None:
+        item = self._selected_copy()
+        if item is None:
+            return
+        ticked = item.checkState() is Qt.CheckState.Checked
+        # Through itemChanged, so the group and the counts follow as for a click.
+        item.setCheckState(Qt.CheckState.Unchecked if ticked else Qt.CheckState.Checked)
+
+    @Slot()
+    def _open_selected_copy(self) -> None:
+        item = self._selected_copy()
+        if item is not None:
+            self._preview_item(item)
+
     @Slot(QListWidgetItem)
     def _preview_item(self, item: QListWidgetItem) -> None:
         group = self._current_group()
@@ -1112,6 +1256,8 @@ class MainWindow(QMainWindow):
         self._session_changed()
 
     def manage_remembered(self, *, tab: str = "known") -> None:
+        if self._job is not _Job.IDLE:
+            return  # its thumbnails open archives, which must stay closed meanwhile
         dialog = RememberedDialog(self.cache, self.thumbs, self, tab=tab)
         dialog.exec()
         if dialog.changed:
@@ -1145,7 +1291,7 @@ class MainWindow(QMainWindow):
     # -- removal -----------------------------------------------------------
     @Slot()
     def apply_removals(self) -> None:
-        if self._scan_worker is not None or self._removal_worker is not None:
+        if self._job is not _Job.IDLE:
             return
         marked = [g for g in self.groups if g.decision is Decision.DELETE]
         if not marked:
@@ -1162,17 +1308,21 @@ class MainWindow(QMainWindow):
             )
             return
 
-        emptied = [p for p in plans if p.remaining_pages <= 0]
-        if emptied:
-            QMessageBox.critical(
+        # The command line's rule: a book losing more than a quarter of its pages
+        # is two copies of one issue matching each other, not adverts. Emptying a
+        # book is the extreme case. Those are listed and left alone.
+        plans, skipped = split_by_fraction(plans, DEFAULT_MAX_FRACTION)
+        if not plans:
+            QMessageBox.information(
                 self,
-                "That would empty a book",
-                "These archives would lose every page, so nothing was changed:\n\n"
-                + "\n".join(f"  {p.archive.name}" for p in emptied[:10]),
+                "Nothing can be removed",
+                f"Every affected book would lose more than {DEFAULT_MAX_FRACTION:.0%} of "
+                "its pages, which usually means two copies of the same issue are matching "
+                "each other. Nothing was changed:\n\n" + _skipped_lines(skipped),
             )
             return
 
-        dialog = _ConfirmDialog(plans, self.settings, self)
+        dialog = _ConfirmDialog(plans, skipped, self.settings, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
@@ -1180,7 +1330,6 @@ class MainWindow(QMainWindow):
         # file be renamed while a handle is alive.
         self.thumbs.release_archives()
 
-        self._set_busy(True, "Removing", lock_views=True)
         worker = RemovalWorker(
             plans,
             backup=self.settings.backup_policy(),
@@ -1198,6 +1347,8 @@ class MainWindow(QMainWindow):
         self._removal_worker = worker
         self._removal_was_dry_run = dialog.dry_run()
         self._removal_total = len(plans)
+        self._skipped_plans = skipped
+        self._job_changed("Removing")
         worker.start()
 
     @Slot()
@@ -1215,7 +1366,16 @@ class MainWindow(QMainWindow):
         self.btn_cancel.setText("Stopping...")
         self.status_label.setText("Stopping after the current book...")
 
-    def _cancel_note(self, report: object, outcome: str) -> list[str]:
+    def _skipped_note(self, outcome: str) -> list[str]:
+        if not self._skipped_plans:
+            return []
+        return [
+            "",
+            f"{len(self._skipped_plans)} book(s) {outcome}: each would lose more than "
+            f"{DEFAULT_MAX_FRACTION:.0%} of its pages.",
+        ]
+
+    def _cancel_note(self, report: RemovalReport, outcome: str) -> list[str]:
         if not report.cancelled:
             return []
         untouched = self._removal_total - len(report.results)
@@ -1228,8 +1388,11 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"Rewriting {done}/{total}: {name}")
 
     @Slot(object)
-    def _on_removal_done(self, report: object) -> None:
+    def _on_removal_done(self, report: RemovalReport) -> None:
         if self._closing:
+            return
+        if report.blocked:
+            self._show_shortfall(report)
             return
         succeeded = report.succeeded
         failed = report.failed
@@ -1258,6 +1421,7 @@ class MainWindow(QMainWindow):
             lines.append("")
             lines.append(f"{len(failed)} archive(s) failed and were left untouched:")
             lines += [f"  {r.archive.name}: {r.error}" for r in failed[:8]]
+        lines += self._skipped_note("were skipped and are unchanged")
         lines += self._cancel_note(report, "were not processed and are unchanged")
 
         self._last_backups = [
@@ -1338,7 +1502,17 @@ class MainWindow(QMainWindow):
         self._pending_rescan = rescan
         self.status_label.setText("Removal finished.")
 
-    def _show_dry_run_result(self, report: object) -> None:
+    def _show_shortfall(self, report: RemovalReport) -> None:
+        """A run, real or dry, refused before its first book: nothing changed."""
+        QMessageBox.warning(
+            self,
+            "Not enough disk space",
+            "\n\n".join(s.describe() for s in report.space_shortfall)
+            + "\n\nFree some space, or choose a backup or output folder on another "
+            "drive in Settings, and apply again.",
+        )
+
+    def _show_dry_run_result(self, report: RemovalReport) -> None:
         """Report what a dry run would have done. Nothing on disk changed, so the
         library, cache and thumbnails are left exactly as they were."""
         lines = [
@@ -1356,6 +1530,7 @@ class MainWindow(QMainWindow):
             lines.append("")
             lines.append(f"{len(report.failed)} archive(s) would fail:")
             lines += [f"  {r.archive.name}: {r.error}" for r in report.failed[:8]]
+        lines += self._skipped_note("would be skipped")
         lines += self._cancel_note(report, "were not checked")
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Information)
@@ -1381,7 +1556,7 @@ class MainWindow(QMainWindow):
         return removed, freed
 
     def show_history(self) -> None:
-        if self._scan_worker is not None or self._removal_worker is not None:
+        if self._job is not _Job.IDLE:
             return
         # Restoring replaces files, which Windows refuses while a thumbnail holds one open.
         self.thumbs.release_archives()
@@ -1393,23 +1568,28 @@ class MainWindow(QMainWindow):
     def _after_restore(self, items: list) -> None:
         """Bring the library in line with books that were just put back."""
         rescan: list[Path] = []
+        added = 0
         for item in items:
-            listed = item.archive in self.archives or item.output in self.archives
             self.thumbs.invalidate(item.archive)
             if item.output != item.archive:
                 # A cbr rebuilt as cbz: the cbz is gone and the cbr is back.
                 self.archives.pop(item.output, None)
                 self.thumbs.invalidate(item.output)
-            if listed:
-                self.archives[item.archive] = ArchiveInfo(
-                    path=item.archive, kind=_kind_of(item.archive), size=0, mtime_ns=0
-                )
-                rescan.append(item.archive)
+            # Books restored from History come back into the library even if they
+            # had been taken out of it, or the restore would look like it did nothing.
+            added += item.archive not in self.archives
+            self.archives[item.archive] = ArchiveInfo(
+                path=item.archive, kind=_kind_of(item.archive), size=0, mtime_ns=0
+            )
+            rescan.append(item.archive)
         self._refresh_archive_list()
         self.rebuild_groups()
         self._session_changed()
-        self.status_label.setText(f"Restored {len(items)} book(s).")
+        note = f" {added} of them were added back to the library." if added else ""
+        self.status_label.setText(f"Restored {len(items)} book(s).{note}")
         if rescan:
+            # Kept until the rescan ends; its progress messages would bury it.
+            self._startup_note = f"Restored {len(items)} book(s).{note}"
             self._run_scan(rescan)
 
     @Slot()
@@ -1468,8 +1648,7 @@ class MainWindow(QMainWindow):
         self._removal_worker = None
         if self._closing:
             return
-        self._set_busy(False)
-        self._refresh_status()
+        self._job_changed()
         # Re-hash just the books that were rewritten, so the review reflects what
         # is on disk now without a manual rescan of the whole library.
         rescan = [p for p in self._pending_rescan if p in self.archives]
@@ -1485,6 +1664,7 @@ class MainWindow(QMainWindow):
         straight from the hash cache, and the scan is what lets the saved review
         decisions find their groups again.
         """
+        self._recover_interrupted(paths)
         restored = self._restore_session() if self.settings.restore_session else 0
         if paths:
             self.import_paths(paths)
@@ -1507,7 +1687,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Checking for updates...")
         checker.start()
 
-    def _on_update_result(self, release: object, error: str, quiet: bool) -> None:
+    def _on_update_result(self, release: Release | None, error: str, quiet: bool) -> None:
         self._update_checker = None
         if self._closing:
             return
@@ -1541,6 +1721,28 @@ class MainWindow(QMainWindow):
             )
         self._refresh_status()
 
+    def _recover_interrupted(self, paths: list[Path] | None) -> None:
+        """Put back books a killed removal left only as a backup.
+
+        Runs before the last session's books are looked for, or a book that is
+        only missing because of it would be reported as gone.
+        """
+        roots = list(paths or [])
+        session = load_session(self._session_file)
+        if session is not None:
+            roots += session.archives
+        if not roots:
+            return
+        restored = [r for r in recover_interrupted(roots) if r.restored]
+        if restored:
+            self._add_startup_note(
+                f"Put back {len(restored)} book(s) an interrupted removal had left "
+                "only as a backup."
+            )
+
+    def _add_startup_note(self, note: str) -> None:
+        self._startup_note = f"{self._startup_note} {note}".strip()
+
     def _restore_session(self) -> int:
         session = load_session(self._session_file)
         if session is None:
@@ -1552,11 +1754,14 @@ class MainWindow(QMainWindow):
             )
         self._restored = dict(session.decisions)
         self._refresh_archive_list()
-        missing = len(session.archives) - len(present)
+        found = set(present)
+        missing = [p for p in session.archives if p.resolve() not in found]
         if missing:
-            self._startup_note = (
-                f"{missing} archive(s) from last time could not be found."
+            self._add_startup_note(
+                f"{len(missing)} archive(s) from last time could not be found."
             )
+            # The status line is soon overwritten; this stays until dismissed.
+            self._show_missing_banner(missing)
         return len(present)
 
     def _session_changed(self) -> None:
@@ -1568,10 +1773,12 @@ class MainWindow(QMainWindow):
         self._session_timer.stop()
         if not self.settings.restore_session:
             return
-        decisions = dict(self._restored)  # not regrouped yet, so still worth keeping
+        # Last session's decisions still waiting on a scan, then everything decided
+        # now. Ones that were applied or matched nothing are already gone.
+        decisions = dict(self._restored)
         for group in self.groups:
             if group.decision is not Decision.UNDECIDED or group.kept:
-                decisions[group.gid] = SavedDecision(group.decision, set(group.kept))
+                decisions[group.gid] = _saved(group)
             else:
                 decisions.pop(group.gid, None)
         save_session(
@@ -1605,6 +1812,13 @@ class MainWindow(QMainWindow):
         # Matching options only affect clustering, so no rescan is needed.
         self.rebuild_groups()
 
+    def _on_system_colour_scheme_changed(self, scheme: object = None) -> None:
+        # Only "Follow system" follows; an explicit Light or Dark stays put.
+        if self._closing or self.settings.theme_mode() is not Theme.SYSTEM:
+            return
+        apply_theme(Theme.SYSTEM)
+        self._restyle()
+
     def _restyle(self) -> None:
         """Re-apply colours that are not driven by the palette."""
         self.welcome.refresh()
@@ -1613,6 +1827,15 @@ class MainWindow(QMainWindow):
             f"#toolsBanner {{ border: 1px solid {warning}; border-radius: 6px; }}"
         )
         self.tools_banner_text.setStyleSheet(f"color: {warning};")
+        self.missing_banner.setStyleSheet(
+            f"#missingBanner {{ border: 1px solid {warning}; border-radius: 6px; }}"
+        )
+        self.missing_banner_text.setStyleSheet(f"color: {warning};")
+        for row in range(self.archive_list.count()):
+            item = self.archive_list.item(row)
+            info = self.archives.get(Path(item.data(Qt.ItemDataRole.UserRole)))
+            if info is not None and info.error:
+                item.setForeground(QBrush(colour("delete")))
         self.detail_warning.setStyleSheet(f"color: {colour('warning').name()};")
         self.detail_hint.setStyleSheet(f"color: {colour('muted').name()};")
         self.library_summary.setStyleSheet(f"color: {colour('muted').name()};")
@@ -1623,11 +1846,27 @@ class MainWindow(QMainWindow):
                 item.setForeground(QBrush(_decision_colour(group.decision)))
 
     # -- misc --------------------------------------------------------------
-    def _set_busy(self, busy: bool, verb: str = "", *, lock_views: bool = False) -> None:
+    @property
+    def _job(self) -> _Job:
+        """What the window is doing, read from the workers so it cannot drift.
+
+        A worker's slot is cleared only once its thread has fully exited, so a
+        removal counts as running until then, results dialog and all.
+        """
+        if self._removal_worker is not None:
+            return _Job.REMOVING
+        if self._scan_worker is not None:
+            return _Job.SCANNING
+        return _Job.IDLE
+
+    def _job_changed(self, verb: str = "") -> None:
+        """Bring the window in line with a worker that has just started or ended."""
+        job = self._job
+        busy = job is not _Job.IDLE
         # While archives are being rewritten the review panels stay untouched:
         # browsing a group makes the thumbnail cache open the very files the
         # removal is about to swap, and on Windows an open file cannot be replaced.
-        self.centralWidget().setEnabled(not (busy and lock_views))
+        self._central.setEnabled(job is not _Job.REMOVING)
         self.progress.setVisible(busy)
         self.btn_cancel.setVisible(busy)
         self.btn_cancel.setEnabled(True)
@@ -1635,11 +1874,28 @@ class MainWindow(QMainWindow):
         if busy:
             self.progress.setValue(0)
             self.status_label.setText(f"{verb}...")
+            self._update_actions()
+        else:
+            self._refresh_status()
+
+    def _update_actions(self, marked_pages: int | None = None) -> None:
+        """The one place the toolbar's actions are switched on and off."""
+        job = self._job
+        idle = job is _Job.IDLE
+        # During a scan, Scan is its Cancel button. During a removal it would start
+        # hashing the very files being rewritten, so it is off until the removal
+        # thread has fully finished.
+        self.act_scan.setEnabled(job is not _Job.REMOVING)
+        self.act_scan.setText("Cancel Scan" if job is _Job.SCANNING else "Scan")
+        if marked_pages is None:
+            marked_pages = summarise(self.groups)["marked_pages"]
+        # Marking groups mid-scan must not enable Apply: the groups on screen are
+        # about to be replaced by the scan's results.
+        self.act_apply.setEnabled(idle and marked_pages > 0)
         for action in (
             self.act_add_files,
             self.act_add_folder,
             self.act_remove,
-            self.act_apply,
             self.act_clean_backups,
             # Its thumbnails open archives, which must stay closed during a removal.
             self.act_remembered,
@@ -1647,16 +1903,11 @@ class MainWindow(QMainWindow):
             self.act_history,
             self.act_settings,
         ):
-            action.setEnabled(not busy)
-        if not busy:
-            self._refresh_status()
+            action.setEnabled(idle)
 
     def _refresh_status(self) -> None:
         stats = summarise(self.groups)
-        # Marking groups mid-scan used to re-enable this while the groups on screen
-        # were about to be replaced by the scan's results.
-        idle = self._scan_worker is None and self._removal_worker is None
-        self.act_apply.setEnabled(stats["marked_pages"] > 0 and idle)
+        self._update_actions(stats["marked_pages"])
         if not self.groups:
             if any(a.pages for a in self.archives.values()):
                 self.status_label.setText("No duplicate pages found with these settings.")
@@ -1667,22 +1918,52 @@ class MainWindow(QMainWindow):
             f"{human_bytes(stats['recoverable'])} recoverable."
         )
 
-    def closeEvent(self, event: object) -> None:
+    def closeEvent(self, event: QCloseEvent) -> None:
         self._closing = True
-        for worker in (self._scan_worker, self._removal_worker):
-            if worker is not None:
-                worker.cancel()
-                worker.wait(4000)
+        workers = [w for w in (self._scan_worker, self._removal_worker) if w is not None]
+        # Both stop between books: a scan drops the books not yet started, and a
+        # removal finishes swapping in the one it is on, never half of it.
+        for worker in workers:
+            worker.cancel()
+        for worker in workers:
+            worker.wait(CLOSE_WAIT_MS)
+        running = [w for w in workers if w.isRunning()]
+        if running:
+            # Still writing to the hash cache (and a removal to disk), so neither
+            # the cache nor the thumbnail pool may be shut yet. Stay open, and
+            # close by ourselves the moment the last one is done.
+            event.ignore()
+            for worker in running:
+                if worker not in self._close_hooked:  # once, however often Close is hit
+                    self._close_hooked.append(worker)
+                    worker.finished.connect(self._close_when_idle)
+            self.status_label.setText("Finishing the current book, then closing...")
+            return
         self.save_session()
         self.thumbs.shutdown()
         self.cache.close()
         super().closeEvent(event)
 
+    @Slot()
+    def _close_when_idle(self) -> None:
+        # Queued after the thread-finished handlers, which clear the worker slots.
+        QTimer.singleShot(0, self._retry_close)
+
+    def _retry_close(self) -> None:
+        if self._scan_worker is None and self._removal_worker is None:
+            self.close()
+
 
 class _ConfirmDialog(QDialog):
     """Last stop before anything on disk is touched."""
 
-    def __init__(self, plans: list, settings: AppSettings, parent: QWidget) -> None:
+    def __init__(
+        self,
+        plans: list[RemovalPlan],
+        skipped: list[RemovalPlan],
+        settings: AppSettings,
+        parent: QWidget,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Apply removals")
         self.setMinimumWidth(560)
@@ -1708,6 +1989,24 @@ class _ConfirmDialog(QDialog):
         note.setWordWrap(True)
         layout.addWidget(note)
 
+        # A backup on the book's own drive is a rename; on another it is a copy.
+        self.volume_note: QLabel | None = None
+        backup_dir = settings.backup_policy().directory
+        if (
+            not settings.output_dir
+            and settings.backup_enabled
+            and backup_dir is not None
+            and any(not on_same_volume(backup_dir, p.archive) for p in plans)
+        ):
+            self.volume_note = QLabel(
+                "The backup folder is on a different drive from these books, so each "
+                "one is copied there in full, not moved: the backup is a complete "
+                "extra copy, and needs that much free space, before its original "
+                "is removed."
+            )
+            self.volume_note.setWordWrap(True)
+            layout.addWidget(self.volume_note)
+
         listing = QListWidget()
         for plan in plans:
             listing.addItem(
@@ -1716,6 +2015,25 @@ class _ConfirmDialog(QDialog):
             )
         listing.setMaximumHeight(240)
         layout.addWidget(listing)
+
+        # Shown here as well as left out, so nothing is skipped silently.
+        self.skipped_listing: QListWidget | None = None
+        if skipped:
+            why = QLabel(
+                f"<b>Skipping {len(skipped)} book(s)</b> that would lose more than "
+                f"{DEFAULT_MAX_FRACTION:.0%} of their pages. That usually means two copies "
+                "of the same issue are matching each other, not adverts."
+            )
+            why.setWordWrap(True)
+            layout.addWidget(why)
+            self.skipped_listing = QListWidget()
+            for plan in skipped:
+                self.skipped_listing.addItem(
+                    f"{plan.archive.name}  —  would remove {len(plan.remove_names)} of "
+                    f"{plan.original_pages}"
+                )
+            self.skipped_listing.setMaximumHeight(120)
+            layout.addWidget(self.skipped_listing)
 
         self.chk_dry_run = QCheckBox("Dry run (report what would happen, change nothing)")
         layout.addWidget(self.chk_dry_run)
@@ -1732,16 +2050,57 @@ class _ConfirmDialog(QDialog):
         return self.chk_dry_run.isChecked()
 
 
+class _Panel(QWidget):
+    """One column of the main view; see MainWindow._panel."""
+
+    title_label: QLabel
+
+
 # Archive kinds that need an external tool to be read at all.
 _NEEDS_TOOL = (ArchiveKind.RAR, ArchiveKind.SEVENZIP)
+
+
+class _Job(enum.Enum):
+    """What the window is busy with; see MainWindow._job."""
+
+    IDLE = "idle"
+    SCANNING = "scanning"
+    REMOVING = "removing"
+
+
+def _widget_shortcut(
+    keys: QKeySequence, widget: QWidget, handler: Callable[[], object]
+) -> QShortcut:
+    """A shortcut that fires only while `widget` itself has focus.
+
+    The context is set after construction on purpose: PySide6 silently ignores a
+    context passed to the constructor alongside a callable, which leaves the
+    shortcut window-wide.
+    """
+    shortcut = QShortcut(keys, widget, handler)
+    shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+    return shortcut
+
+
+def _saved(group: DuplicateGroup) -> SavedDecision:
+    return SavedDecision(group.decision, set(group.kept), {p.key for p in group.pages})
+
+
+def _skipped_lines(skipped: list[RemovalPlan], limit: int = 10) -> str:
+    lines = [
+        f"  {p.archive.name}: would remove {len(p.remove_names)} of {p.original_pages}"
+        for p in skipped[:limit]
+    ]
+    if len(skipped) > limit:
+        lines.append(f"  ...and {len(skipped) - limit} more")
+    return "\n".join(lines)
 
 
 def _decision_colour(decision: Decision) -> QColor:
     """Row colour for a group. Undecided uses the palette so it follows the theme."""
     if decision is Decision.UNDECIDED:
-        app = QApplication.instance()
-        if app is not None:
-            return app.palette().color(QPalette.ColorRole.Text)
+        if QApplication.instance() is not None:
+            return QApplication.palette().color(QPalette.ColorRole.Text)
         return QColor(Qt.GlobalColor.black)
     return colour(
         {

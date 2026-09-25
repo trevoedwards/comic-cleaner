@@ -66,6 +66,18 @@ def test_scan_reports_groups_and_changes_nothing(library, cache_file):
     assert _counts(library) == ORIGINAL
 
 
+def test_threshold_is_capped_where_the_gui_caps_it(library, cache_file, capsys):
+    from comiccleaner.core.grouping import MAX_THRESHOLD
+
+    assert MAX_THRESHOLD == 16
+    code, _, _ = run("scan", str(library), "--cache", cache_file, "--threshold", "16")
+    assert code == cli.EXIT_OK
+    with pytest.raises(SystemExit) as exited:
+        run("scan", str(library), "--cache", cache_file, "--threshold", "17")
+    assert exited.value.code == 2
+    assert "between 0 and 16" in capsys.readouterr().err
+
+
 def test_scan_json_matches_the_library_api(library, cache_file):
     code, out, _ = run("scan", str(library), "--cache", cache_file, "--json")
 

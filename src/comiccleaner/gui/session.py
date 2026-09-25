@@ -7,10 +7,12 @@ import json
 import logging
 import os
 import tempfile
+from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..core.model import Decision
+from ..core.model import Decision, DuplicateGroup
 
 log = logging.getLogger(__name__)
 
@@ -24,13 +26,58 @@ PageKey = tuple[str, str]
 class SavedDecision:
     decision: Decision
     kept: set[PageKey] = field(default_factory=set)
+    # Every page the group held, so the decision can find the group again when
+    # its id changes. Empty for decisions saved before this was recorded.
+    pages: set[PageKey] = field(default_factory=set)
 
 
 @dataclass(slots=True)
 class Session:
     archives: list[Path] = field(default_factory=list)
-    # Keyed by group id, which is stable across rescans.
+    # Keyed by group id, which survives most rescans; see carry_decisions().
     decisions: dict[str, SavedDecision] = field(default_factory=dict)
+
+
+def carry_decisions(
+    prior: Mapping[str, SavedDecision], groups: list[DuplicateGroup]
+) -> tuple[dict[str, SavedDecision], set[str]]:
+    """Match earlier decisions to freshly built groups.
+
+    Returns the decision for each new group id that has one, and the prior ids
+    that were used up (matched, or dropped as ambiguous).
+
+    A group keeps its id unless a similar page with a lower hash joins it. So a
+    decision goes first to the group with the same id; failing that, it follows
+    its pages to the one new group holding most of them. Two earlier decisions
+    landing on the same new group is ambiguous, and it is left undecided rather
+    than given either one.
+    """
+    by_gid = {group.gid: group for group in groups}
+    result: dict[str, SavedDecision] = {}
+    used: set[str] = set()
+    for gid, saved in prior.items():
+        if gid in by_gid:
+            result[gid] = saved
+            used.add(gid)
+
+    owner = {page.key: group.gid for group in groups for page in group.pages}
+    claims: dict[str, list[str]] = {}
+    for gid, saved in prior.items():
+        if gid in used or not saved.pages:
+            continue
+        tally = Counter(owner[key] for key in saved.pages if key in owner)
+        if not tally:
+            continue
+        target, overlap = tally.most_common(1)[0]
+        if overlap * 2 > len(saved.pages):  # most of the old group's pages
+            claims.setdefault(target, []).append(gid)
+
+    for target, sources in claims.items():
+        used.update(sources)
+        if target in result or len(sources) > 1:
+            continue
+        result[target] = prior[sources[0]]
+    return result, used
 
 
 def load_session(path: Path) -> Session | None:
@@ -59,9 +106,10 @@ def load_session(path: Path) -> Session | None:
             try:
                 decision = Decision(saved["decision"])
                 kept = {(str(a), str(n)) for a, n in saved.get("kept", [])}
+                pages = {(str(a), str(n)) for a, n in saved.get("pages", [])}
             except (KeyError, TypeError, ValueError):
                 continue
-            session.decisions[str(gid)] = SavedDecision(decision, kept)
+            session.decisions[str(gid)] = SavedDecision(decision, kept, pages)
     return session
 
 
@@ -71,7 +119,11 @@ def save_session(path: Path, session: Session) -> None:
         "version": _VERSION,
         "archives": [str(p) for p in session.archives],
         "decisions": {
-            gid: {"decision": saved.decision.value, "kept": sorted(saved.kept)}
+            gid: {
+                "decision": saved.decision.value,
+                "kept": sorted(saved.kept),
+                "pages": sorted(saved.pages),
+            }
             for gid, saved in session.decisions.items()
         },
     }

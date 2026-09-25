@@ -26,15 +26,12 @@ from PySide6.QtWidgets import (
 
 from .. import APP_NAME, ORGANISATION
 from ..core.extern import describe_backends
-from ..core.grouping import GroupingOptions
+from ..core.grouping import MAX_THRESHOLD, GroupingOptions
 from ..core.remover import BackupPolicy
 from .theme import Theme
 
 ORG = ORGANISATION
 APP = APP_NAME
-
-# Above roughly a quarter of the 64 bits, "similar" stops meaning anything.
-MAX_THRESHOLD = 16
 
 
 @dataclass

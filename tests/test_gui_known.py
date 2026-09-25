@@ -202,3 +202,26 @@ def test_the_dialog_buttons_do_not_trip_over_qts_checked_flag(window, monkeypatc
         dialog.btn_export.click()  # cancelled in the file dialog; must not raise
     finally:
         dialog.done(QDialog.DialogCode.Accepted)
+
+
+@pytest.mark.parametrize("answer", ["No", "Yes"])
+def test_restore_all_asks_first(window, monkeypatch, answer):
+    window.cache.ignore("00ff", {0xFF}, note="2 copies")
+    asked: list[str] = []
+
+    def question(_parent, title, _text, *a, **k):
+        asked.append(title)
+        return getattr(QMessageBox.StandardButton, answer)
+
+    monkeypatch.setattr(QMessageBox, "question", question)
+    dialog = RememberedDialog(window.cache, window.thumbs, window, tab="ignored")
+    try:
+        dialog.restore_all()
+    finally:
+        dialog.done(QDialog.DialogCode.Accepted)
+
+    assert asked == ["Restore all ignored pages"]
+    if answer == "Yes":
+        assert window.cache.ignored_hashes() == set() and dialog.changed
+    else:
+        assert window.cache.ignored_hashes() == {0xFF} and not dialog.changed

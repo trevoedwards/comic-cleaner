@@ -176,7 +176,7 @@ class RememberedDialog(QDialog):
             item = QListWidgetItem(f"{entry.note or 'Known junk'}\n{origin}")
             item.setData(ROLE_ID, entry.sid)
             pixmap = QPixmap()
-            if entry.thumbnail and pixmap.loadFromData(entry.thumbnail, "PNG"):
+            if entry.thumbnail and pixmap.loadFromData(entry.thumbnail):
                 item.setIcon(QIcon(pixmap))
             else:
                 item.setIcon(_blank())
@@ -282,6 +282,13 @@ class RememberedDialog(QDialog):
         self._populate()
 
     def restore_all(self) -> None:
+        confirm = QMessageBox.question(
+            self,
+            "Restore all ignored pages",
+            "Restore every ignored page? They will show up in the groups again.",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
         self._cache.clear_ignored()
         self.changed = True
         self._populate()

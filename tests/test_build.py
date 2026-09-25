@@ -155,6 +155,63 @@ def test_macos_cli_build_is_a_plain_binary(build_module, monkeypatch):
     assert build_module.output_path(onedir=False, cli=True).name == "comiccleaner-cli"
 
 
+def test_macos_onedir_is_an_app_bundle_too(build_module, monkeypatch):
+    """--windowed --onedir on macOS also yields dist/<name>.app, not a folder."""
+    _retarget(build_module, monkeypatch, windows=False, macos=True)
+
+    produced = build_module.output_path(onedir=True)
+
+    assert produced == build_module.ROOT / "dist" / "ComicCleaner.app"
+
+
+@pytest.mark.parametrize("onedir", [False, True], ids=["onefile", "onedir"])
+def test_macos_console_build_is_a_plain_binary(build_module, monkeypatch, onedir):
+    _retarget(build_module, monkeypatch, windows=False, macos=True)
+
+    produced = build_module.output_path(onedir=onedir, console=True)
+
+    assert produced.suffix == ""
+    assert produced.name == "ComicCleaner"
+
+
+@pytest.mark.parametrize(
+    ("windows", "binary"), [(True, "ComicCleaner.exe"), (False, "ComicCleaner")],
+    ids=["windows", "linux"],
+)
+def test_onedir_elsewhere_is_a_folder_with_the_binary(build_module, monkeypatch, windows, binary):
+    _retarget(build_module, monkeypatch, windows=windows, macos=False)
+
+    produced = build_module.output_path(onedir=True)
+
+    assert produced == build_module.ROOT / "dist" / "ComicCleaner" / binary
+
+
+class _Ran:
+    def __init__(self, returncode: int) -> None:
+        self.returncode = returncode
+
+
+@pytest.mark.parametrize("present", [True, False], ids=["present", "missing"])
+def test_pyinstaller_is_installed_pinned_and_only_when_missing(
+    build_module, monkeypatch, present
+):
+    calls: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        return _Ran(0 if present else 1)
+
+    monkeypatch.setattr(build_module.subprocess, "run", fake_run)
+
+    build_module.ensure_pyinstaller("python")
+
+    installs = [c for c in calls if "install" in c]
+    if present:
+        assert installs == []
+    else:
+        assert installs == [["python", "-m", "pip", "install", "--quiet", "pyinstaller>=6.3,<8"]]
+
+
 def test_cli_smoke_test_png_is_a_real_image(build_module):
     """The console build is smoke-tested on this; a bad PNG would fail every build."""
     import io

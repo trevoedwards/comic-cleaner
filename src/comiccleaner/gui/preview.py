@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from functools import partial
+from typing import cast
+
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtGui import QImage, QKeyEvent, QKeySequence, QPixmap, QResizeEvent, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -86,7 +89,7 @@ class _ImagePane(QWidget):
             self.view.setText(fallback)
         self._rescale()
 
-    def resizeEvent(self, event: object) -> None:
+    def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self._rescale()
 
@@ -100,6 +103,28 @@ class _ImagePane(QWidget):
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
+
+
+class _LeaveKeysToDialog(QObject):
+    """Stops a checkbox acting on keys the dialog's own shortcuts handle.
+
+    A focused checkbox toggles itself on Space. With the dialog's Space shortcut
+    toggling it too, one press could flip it twice, changing nothing, depending
+    on how the platform routes the key. Here the checkbox never claims these
+    keys, so the dialog's shortcut is the one thing that acts on them.
+    """
+
+    _EVENTS = (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress, QEvent.Type.KeyRelease)
+
+    def __init__(self, keys: tuple[Qt.Key, ...], parent: QObject) -> None:
+        super().__init__(parent)
+        self._keys = set(keys)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() in self._EVENTS and cast(QKeyEvent, event).key() in self._keys:
+            event.ignore()  # not claimed, so the shortcut still gets the key
+            return True
+        return False
 
 
 class PagePreviewDialog(QDialog):
@@ -132,6 +157,11 @@ class PagePreviewDialog(QDialog):
         self._caption = ""
         self._compare = group.kind is MatchKind.SIMILAR
         self._reference = group.representative
+        # The difference image is worked out on the thumbnail thread, not here: at
+        # full size it takes long enough to stall the window. The one asked for
+        # last, and the last one that came back (key, image or None, share changed).
+        self._diff_wanted: str | None = None
+        self._diff: tuple[str, QPixmap | None, float] | None = None
 
         layout = QVBoxLayout(self)
         panes = QHBoxLayout()
@@ -174,7 +204,8 @@ class PagePreviewDialog(QDialog):
         controls.addWidget(close)
         layout.addLayout(controls)
 
-        # Dialog-wide, so they work whichever control has focus.
+        # Dialog-wide, so they work whichever control has focus, and the only
+        # thing that handles these keys: see _LeaveKeysToDialog.
         for keys, handler in (
             (Qt.Key.Key_Left, lambda: self.step(-1)),
             (Qt.Key.Key_Right, lambda: self.step(1)),
@@ -182,12 +213,20 @@ class PagePreviewDialog(QDialog):
             (Qt.Key.Key_H, self.chk_diff.toggle),
         ):
             QShortcut(QKeySequence(keys), self, handler)
+        self._key_guard = _LeaveKeysToDialog((Qt.Key.Key_Space, Qt.Key.Key_H), self)
+        for box in (self.chk_remove, self.chk_diff):
+            box.installEventFilter(self._key_guard)
 
         thumbs.page_loaded.connect(self._on_page_loaded)
-        self.finished.connect(lambda _: thumbs.page_loaded.disconnect(self._on_page_loaded))
+        thumbs.task_done.connect(self._on_diff_done)
+        self.finished.connect(self._disconnect)
         if self._compare:
             self._request(self._reference)
         self._show_current()
+
+    def _disconnect(self) -> None:
+        self._thumbs.page_loaded.disconnect(self._on_page_loaded)
+        self._thumbs.task_done.disconnect(self._on_diff_done)
 
     # -- navigation --------------------------------------------------------
     def current_page(self) -> PageEntry:
@@ -261,13 +300,49 @@ class PagePreviewDialog(QDialog):
         # Diffing the reference against itself would only ever report 0%.
         show_diff = self._compare and self.chk_diff.isChecked() and page is not self._reference
         if show_diff and reference is not None:
-            diff, changed = difference_image(reference, current)
-            self.copy_pane.caption.setText(
-                f"{self._caption} — {changed:.1%} of pixels differ"
-            )
-            self.copy_pane.set_pixmap(pil_to_pixmap(diff))
+            self._render_diff(page, reference, current)
         else:
             self.copy_pane.set_pixmap(self._pixmap(page, current))
+
+    def _diff_key(self, page: PageEntry) -> str:
+        reference = ThumbnailCache.key_for(self._reference)
+        return f"diff|{reference}|{ThumbnailCache.key_for(page)}"
+
+    def _render_diff(self, page: PageEntry, reference: Image.Image, current: Image.Image) -> None:
+        key = self._diff_key(page)
+        if self._diff is not None and self._diff[0] == key:
+            _, pixmap, changed = self._diff
+            if pixmap is None:
+                self.copy_pane.caption.setText(f"{self._caption} — could not compare")
+                self.copy_pane.set_pixmap(self._pixmap(page, current))
+            else:
+                self.copy_pane.caption.setText(
+                    f"{self._caption} — {changed:.1%} of pixels differ"
+                )
+                self.copy_pane.set_pixmap(pixmap)
+            return
+        # The plain copy until the highlight is ready.
+        self.copy_pane.caption.setText(f"{self._caption} — comparing...")
+        self.copy_pane.set_pixmap(self._pixmap(page, current))
+        if self._diff_wanted != key:
+            self._diff_wanted = key
+            self._thumbs.run_task(key, partial(difference_image, reference, current))
+
+    def _on_diff_done(self, key: str, result: object, error: str) -> None:
+        if key != self._diff_wanted:
+            return  # someone else's task, or a page the user has since left
+        self._diff_wanted = None
+        page = self.current_page()
+        showing = self._compare and self.chk_diff.isChecked() and page is not self._reference
+        if not showing or key != self._diff_key(page):
+            return  # the highlight was turned off, or this page left, meanwhile
+        if error or not isinstance(result, tuple):
+            self._diff = (key, None, 0.0)
+        else:
+            diff, changed = result
+            # Made here, on the UI thread: pixmaps may not be made anywhere else.
+            self._diff = (key, pil_to_pixmap(diff), changed)
+        self._render()
 
     # -- decisions ---------------------------------------------------------
     def _on_remove_toggled(self, checked: bool) -> None:

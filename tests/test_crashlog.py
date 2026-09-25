@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -72,6 +74,25 @@ def test_falls_back_when_the_launch_directory_is_not_writable(
 
     assert path is not None
     assert path.parent == fallback / "crashlog"
+
+
+def test_the_fallback_is_the_shared_data_folder_without_importing_the_gui():
+    """A headless crash must not pull in Qt just to find somewhere to write."""
+    script = (
+        "import sys\n"
+        "from comiccleaner import crashlog, paths\n"
+        "assert crashlog._fallback_directory() == paths.data_dir()\n"
+        "loaded = sorted(m for m in sys.modules\n"
+        "                if m.startswith(('PySide6', 'comiccleaner.gui')))\n"
+        "assert not loaded, loaded\n"
+    )
+    root = Path(__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONPATH": str(root / "src")}
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, env=env, timeout=60
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_returns_none_when_nowhere_is_writable(tmp_path, monkeypatch):

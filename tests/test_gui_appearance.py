@@ -103,6 +103,32 @@ def test_follow_system_clears_the_override_before_asking_the_os(qapp, monkeypatc
     assert events == ["reset", "query"]
 
 
+def test_follow_system_tracks_the_os_while_running(window, monkeypatch):
+    """Offscreen Qt never changes scheme by itself, so the OS's signal is emitted here."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QGuiApplication
+
+    from comiccleaner.gui import theme
+
+    hints = QGuiApplication.styleHints()
+    window.settings.theme = "system"
+    monkeypatch.setattr(theme, "system_is_dark", lambda: False)
+    apply_theme(Theme.SYSTEM)
+    assert effective_is_dark() is False
+
+    monkeypatch.setattr(theme, "system_is_dark", lambda: True)
+    hints.colorSchemeChanged.emit(Qt.ColorScheme.Dark)
+    assert effective_is_dark() is True
+    assert window.detail_hint.styleSheet().endswith(f"{colour('muted').name()};")
+
+    # An explicit choice is left alone whatever the OS does.
+    window.settings.theme = "light"
+    apply_theme(Theme.LIGHT)
+    hints.colorSchemeChanged.emit(Qt.ColorScheme.Dark)
+    assert effective_is_dark() is False
+    apply_theme(Theme.LIGHT)
+
+
 def test_semantic_colours_differ_between_themes(qapp):
     apply_theme(Theme.LIGHT)
     light_delete = colour("delete").name()

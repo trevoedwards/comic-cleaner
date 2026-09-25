@@ -63,7 +63,32 @@ jobs:
       - name: Lint
         run: python -m ruff check .
 
+      - name: Type check
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        # The tree still has older mypy errors, so for now only the files listed
+        # here are held clean. A crash (exit 2) always fails. Add files to the list
+        # as they are cleaned up, and drop the filter once the whole tree passes.
+        shell: bash
+        run: |
+          status=0
+          python -m mypy > mypy.txt 2>&1 || status=$?
+          cat mypy.txt
+          if [ "$status" -gt 1 ]; then
+            echo "::error::mypy did not finish (exit $status)"
+            exit 1
+          fi
+          gated='src/comiccleaner/(units|cli|core/archive|core/scanner|core/remover|gui/main_window|gui/preview|gui/remembered|gui/thumbs)\.py'
+          if grep -E "^${gated}:[0-9]+: error" mypy.txt; then
+            echo "::error::mypy found errors in files that are held clean"
+            exit 1
+          fi
+
+      - name: Test with coverage
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: python -m pytest -q --cov=comiccleaner --cov-report=term-missing
+
       - name: Test
+        if: ${{ !(matrix.os == 'ubuntu-latest' && matrix.python == '3.12') }}
         run: python -m pytest -q
 
       - name: Self-test the source tree
@@ -117,15 +142,46 @@ jobs:
 
       - name: Self-test the packaged build
         if: runner.os != 'Windows'
-        # Windowed builds have no stdout, so the report goes to a file; on
-        # macOS the executable lives inside the .app bundle.
+        # Windowed builds have no stdout, so the report may go to a file instead;
+        # on macOS the executable lives inside the .app bundle. A non-zero exit,
+        # or a FAIL: line in either report, fails the job.
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then
-            ./dist/ComicCleaner.app/Contents/MacOS/ComicCleaner --self-test || true
+            exe=./dist/ComicCleaner.app/Contents/MacOS/ComicCleaner
           else
-            ./dist/ComicCleaner --self-test || true
+            exe=./dist/ComicCleaner
           fi
+          status=0
+          "$exe" --self-test > selftest-stdout.txt 2>&1 || status=$?
+          cat selftest-stdout.txt
           cat comiccleaner-selftest.txt 2>/dev/null || true
+          if [ "$status" -ne 0 ]; then
+            echo "::error::The packaged self-test exited with status $status"
+            exit 1
+          fi
+          # -s: the file report exists only when there was no stdout.
+          if grep -Eqs '^[[:space:]]*FAIL:' selftest-stdout.txt comiccleaner-selftest.txt; then
+            echo "::error::The packaged self-test reported a failure"
+            exit 1
+          fi
+        shell: bash
+
+      - name: Self-test the packaged command-line exe
+        if: runner.os == 'Windows'
+        # The windowed exe has no console to report to or exit code to wait on,
+        # so the console build, packaged the same way, runs the self-test.
+        run: |
+          status=0
+          ./dist/comiccleaner-cli.exe --self-test > selftest-stdout.txt 2>&1 || status=$?
+          cat selftest-stdout.txt
+          if [ "$status" -ne 0 ]; then
+            echo "::error::The packaged self-test exited with status $status"
+            exit 1
+          fi
+          if grep -Eq '^[[:space:]]*FAIL:' selftest-stdout.txt; then
+            echo "::error::The packaged self-test reported a failure"
+            exit 1
+          fi
         shell: bash
 
       - name: Package for download

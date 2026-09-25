@@ -66,14 +66,13 @@ def _fallback_directory() -> Path:
     """Used when the launch directory cannot be written to.
 
     Binaries in Program Files, /usr/bin or a read-only mount would otherwise
-    lose the report entirely, which is the one moment it matters.
+    lose the report entirely, which is the one moment it matters. This is the
+    data folder the GUI and the command line share, worked out without Qt, so a
+    headless crash never has to import the GUI to find somewhere to write.
     """
-    try:
-        from .gui.settings import data_dir
+    from .paths import data_dir
 
-        return data_dir()
-    except Exception:
-        return Path.home() / ".comiccleaner"
+    return data_dir()
 
 
 def crash_dir(create: bool = True) -> Path | None:

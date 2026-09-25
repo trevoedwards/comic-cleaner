@@ -71,6 +71,11 @@ def venv_python() -> str:
     return str(candidate) if candidate.exists() else sys.executable
 
 
+# The floor matches the build extra in pyproject.toml; the ceiling keeps a future
+# major release, free to change the flags used here, from being picked up blind.
+PYINSTALLER_REQUIREMENT = "pyinstaller>=6.3,<8"
+
+
 def ensure_pyinstaller(python: str) -> None:
     probe = subprocess.run(
         [python, "-c", "import PyInstaller"],
@@ -80,7 +85,9 @@ def ensure_pyinstaller(python: str) -> None:
     if probe.returncode == 0:
         return
     print("Installing PyInstaller...", flush=True)
-    subprocess.run([python, "-m", "pip", "install", "--quiet", "pyinstaller"], check=True)
+    subprocess.run(
+        [python, "-m", "pip", "install", "--quiet", PYINSTALLER_REQUIREMENT], check=True
+    )
 
 
 def icon_argument() -> list[str]:
@@ -105,11 +112,11 @@ def add_data_argument() -> list[str]:
     return ["--add-data", f"{source}{separator}comiccleaner/assets"]
 
 
-def output_path(onedir: bool, *, cli: bool = False) -> Path:
+def output_path(onedir: bool, *, cli: bool = False, console: bool = False) -> Path:
     dist = ROOT / "dist"
     name = CLI_NAME if cli else APP_NAME
-    if IS_MACOS and not onedir and not cli:
-        # --windowed on macOS always produces a .app bundle.
+    if IS_MACOS and not (cli or console):
+        # --windowed on macOS always produces a .app bundle, onefile or onedir.
         return dist / f"{name}.app"
     binary = f"{name}.exe" if IS_WINDOWS else name
     return dist / name / binary if onedir else dist / binary
@@ -153,7 +160,7 @@ def build(args: argparse.Namespace) -> Path:
     if result.returncode != 0:
         raise SystemExit(f"PyInstaller failed with exit code {result.returncode}")
 
-    produced = output_path(args.onedir, cli=args.cli)
+    produced = output_path(args.onedir, cli=args.cli, console=args.console)
     if not produced.exists():
         raise SystemExit(f"Build reported success but {produced} is missing")
 
@@ -374,7 +381,7 @@ def main() -> int:
 
     check = smoke_test_cli if args.cli else smoke_test
     if args.smoke_only:
-        produced = output_path(args.onedir, cli=args.cli)
+        produced = output_path(args.onedir, cli=args.cli, console=args.console)
         if not produced.exists():
             raise SystemExit(f"Nothing to test: {produced} does not exist")
         return check(produced)

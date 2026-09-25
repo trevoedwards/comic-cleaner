@@ -2,6 +2,9 @@
 
 Rescanning a large library is dominated by image decoding, so results are cached
 against (path, size, mtime). Touching an archive invalidates only that archive.
+
+A page that failed to decode is cached too, stamped with the Pillow build that
+failed on it. When that build changes, only those failures are tried again.
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from .hashing import codec_fingerprint
 from .model import PageEntry
 
 log = logging.getLogger(__name__)
@@ -36,6 +40,7 @@ CREATE TABLE IF NOT EXISTS pages (
     dhash       INTEGER NOT NULL,
     flat        INTEGER NOT NULL DEFAULT 0,
     error       TEXT,
+    codecs      TEXT,
     PRIMARY KEY (path, name),
     FOREIGN KEY (path) REFERENCES archives(path) ON DELETE CASCADE
 );
@@ -92,9 +97,16 @@ CREATE TABLE IF NOT EXISTS run_items (
 CREATE INDEX IF NOT EXISTS run_items_run ON run_items(run_id);
 """
 
-# Columns added to `ignored` after it first shipped, so the manager can show a
-# thumbnail of what was hidden. Added on open to databases that predate them.
-_IGNORED_COLUMNS = {"sample_path": "TEXT", "sample_name": "TEXT"}
+# Columns added after a table first shipped, and added on open to databases
+# that predate them. `ignored` gained a sample so the manager can show a
+# thumbnail of what was hidden; `pages` gained the codec fingerprint a decode
+# failure was recorded under (NULL on older rows, so those are retried once).
+_ADDED_COLUMNS = {
+    "ignored": {"sample_path": "TEXT", "sample_name": "TEXT"},
+    "pages": {"codecs": "TEXT"},
+}
+
+_PAGE_COLUMNS = "name, idx, size, width, height, content_sha, dhash, flat, error, codecs"
 
 
 @dataclass(slots=True)
@@ -137,8 +149,10 @@ class HashCache:
     """Thread-safe: the scanner hashes archives on a pool of worker threads and
     they all write back through this one connection."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, codecs: str | None = None) -> None:
         self.db_path = Path(db_path)
+        # What this process's Pillow can decode; see stale_errors().
+        self.codecs = codecs if codecs is not None else codec_fingerprint()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(
             str(self.db_path), check_same_thread=False, timeout=30.0
@@ -151,10 +165,11 @@ class HashCache:
         self.conn.commit()
 
     def _migrate(self) -> None:
-        present = {row[1] for row in self.conn.execute("PRAGMA table_info(ignored)")}
-        for column, kind in _IGNORED_COLUMNS.items():
-            if column not in present:
-                self.conn.execute(f"ALTER TABLE ignored ADD COLUMN {column} {kind}")
+        for table, columns in _ADDED_COLUMNS.items():
+            present = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
+            for column, kind in columns.items():
+                if column not in present:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
 
     def close(self) -> None:
         with self._lock:
@@ -227,9 +242,8 @@ class HashCache:
             )
             if Path(old).exists():
                 self.conn.execute(
-                    "INSERT INTO pages(path, name, idx, size, width, height, content_sha, "
-                    "dhash, flat, error) SELECT ?, name, idx, size, width, height, "
-                    "content_sha, dhash, flat, error FROM pages WHERE path = ?",
+                    f"INSERT INTO pages(path, {_PAGE_COLUMNS}) "
+                    f"SELECT ?, {_PAGE_COLUMNS} FROM pages WHERE path = ?",
                     (key, old),
                 )
             else:
@@ -249,16 +263,32 @@ class HashCache:
                 (key, size, mtime_ns),
             )
             self.conn.executemany(
-                "INSERT INTO pages(path, name, idx, size, width, height, content_sha, "
-                "dhash, flat, error) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                f"INSERT INTO pages(path, {_PAGE_COLUMNS}) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 [
                     (
                         key, p.name, p.index, p.size, p.width, p.height,
                         p.content_sha, _to_signed(p.dhash), int(p.flat), p.error,
+                        self.codecs,
                     )
                     for p in pages
                 ],
             )
+
+    def stale_errors(self, path: Path) -> set[str]:
+        """Pages of a cached archive that failed to decode under a different Pillow.
+
+        A failure is kept only as long as the codecs that produced it: upgrading
+        Pillow or adding a plugin can make an unreadable page readable. Pages that
+        decoded fine are never in this set, so an upgrade costs no rescan of them.
+        """
+        key = str(Path(path).resolve())
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT name FROM pages WHERE path = ? AND error IS NOT NULL "
+                "AND error != '' AND (codecs IS NULL OR codecs != ?)",
+                (key, self.codecs),
+            ).fetchall()
+        return {r[0] for r in rows}
 
     def invalidate(self, path: Path) -> None:
         key = str(Path(path).resolve())

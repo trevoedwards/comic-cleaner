@@ -35,9 +35,10 @@ for everything else, including `--output`, `--backup-dir`, `--no-backup`,
 
 `clean` asks before changing anything and refuses outright when nobody is there
 to answer, so an unattended run needs `--yes`. It also skips any book that would
-lose more than a quarter of its pages (`--max-fraction` sets the limit). Adverts
-are a page or three, and a larger match usually means two copies of the same
-issue are matching each other page for page. Ctrl+C stops after the current book.
+lose more than a quarter of its pages (`--max-fraction` sets the limit; the GUI
+always uses a quarter). Adverts are a page or three, and a larger match usually
+means two copies of the same issue are matching each other page for page.
+`--threshold` goes up to 16, the same ceiling as the GUI's similarity slider. Ctrl+C stops after the current book.
 
 | Exit code | Meaning |
 |---|---|

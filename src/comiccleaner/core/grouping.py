@@ -26,16 +26,23 @@ _BRUTE_FORCE_LIMIT = 4000
 # where junk is expected to be.
 EDGE_PAGES = 3
 
+# Loosest similarity either front end allows. Above roughly a quarter of the 64
+# bits, "similar" stops meaning anything.
+MAX_THRESHOLD = 16
+
 
 @dataclass(slots=True)
 class GroupingOptions:
-    """Tunables for what counts as a duplicate worth showing."""
+    """Tunables for what counts as a duplicate worth showing.
+
+    The defaults are the product defaults the GUI and the command line ship with.
+    """
 
     threshold: int = 0        # max Hamming distance on the 64-bit dhash
     min_pages: int = 2        # a group needs at least this many page occurrences
-    min_archives: int = 1     # ...spread over at least this many archives
+    min_archives: int = 2     # ...spread over at least this many archives
     include_flat: bool = False  # surface blank/solid-colour pages
-    skip_first_page: bool = False   # never group a book's cover
+    skip_first_page: bool = True    # never group a book's cover
     skip_last_page: bool = False
 
 

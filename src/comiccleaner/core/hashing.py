@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import io
 import logging
@@ -43,6 +44,26 @@ class ImageDigest:
 
 def content_digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+@functools.cache
+def codec_fingerprint() -> str:
+    """A short id for what this Pillow build can decode.
+
+    Stored with cached decode failures: once Pillow or its codecs change (an
+    upgrade adds AVIF, say), those pages are worth another try. Successful
+    hashes do not depend on it and are kept.
+    """
+    from PIL import __version__ as pillow_version
+    from PIL import features
+
+    Image.init()  # loads the format plugins, so their file extensions are listed
+    parts = [
+        pillow_version,
+        *sorted(features.get_supported()),
+        *sorted(Image.registered_extensions()),
+    ]
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
 
 def _open_reduced(

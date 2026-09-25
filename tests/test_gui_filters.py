@@ -96,6 +96,25 @@ def test_show_all_clears_every_filter(window, tmp_path):
     assert not window.btn_show_all.isVisibleTo(window)
 
 
+def test_a_book_hidden_by_the_search_stops_filtering_the_groups(window, tmp_path):
+    _scanned(window, tmp_path / "lib")
+    _select_books(window, "C")
+    assert window.group_list.count() == 1  # only C's group
+
+    window.library_search.setText("a.cbz")  # C no longer shows
+
+    assert window.archive_list.selectedItems() == []
+    assert window._library_selection == set()
+    assert window.group_list.count() == 2
+    assert not window.btn_show_all.isVisibleTo(window)
+
+    # A regroup must not bring the hidden selection back.
+    window.rebuild_groups()
+    window._refresh_archive_list()
+    assert window._library_selection == set()
+    assert window.group_list.count() == 2
+
+
 def test_the_book_selection_survives_a_regroup(window, tmp_path):
     _scanned(window, tmp_path / "lib")
     _select_books(window, "C")
