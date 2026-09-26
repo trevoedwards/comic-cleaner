@@ -10,6 +10,7 @@ failed on it. When that build changes, only those failures are tried again.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import sqlite3
 import threading
@@ -101,9 +102,15 @@ CREATE INDEX IF NOT EXISTS run_items_run ON run_items(run_id);
 # that predate them. `ignored` gained a sample so the manager can show a
 # thumbnail of what was hidden; `pages` gained the codec fingerprint a decode
 # failure was recorded under (NULL on older rows, so those are retried once).
+# `archives.comicinfo` is the book's Series/Number/Title as JSON ("{}" when it
+# has none, NULL when never looked at); `known.tags` is free text for searching;
+# a pinned run keeps its backups through Clean Up Backups.
 _ADDED_COLUMNS = {
     "ignored": {"sample_path": "TEXT", "sample_name": "TEXT"},
     "pages": {"codecs": "TEXT"},
+    "archives": {"comicinfo": "TEXT"},
+    "known": {"tags": "TEXT"},
+    "runs": {"pinned": "INTEGER NOT NULL DEFAULT 0"},
 }
 
 _PAGE_COLUMNS = "name, idx, size, width, height, content_sha, dhash, flat, error, codecs"
@@ -130,6 +137,7 @@ class KnownEntry:
     created_at: float
     thumbnail: bytes | None  # PNG; the page itself is gone from the library
     hashes: set[int]
+    tags: str = ""
 
 
 _SIGN_BIT = 1 << 63
@@ -240,6 +248,7 @@ class HashCache:
                 "INSERT INTO archives(path, size, mtime_ns) VALUES (?, ?, ?)",
                 (key, size, mtime_ns),
             )
+            self._copy_metadata(old, key)
             if Path(old).exists():
                 self.conn.execute(
                     f"INSERT INTO pages(path, {_PAGE_COLUMNS}) "
@@ -253,6 +262,46 @@ class HashCache:
                 self.conn.execute("DELETE FROM archives WHERE path = ?", (old,))
         log.debug("reused cached hashes of %s for %s", old, key)
         return True
+
+    def identity(self, path: Path) -> tuple[int, int] | None:
+        """(size, mtime_ns) recorded for a book, or None if it was never hashed."""
+        key = str(Path(path).resolve())
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT size, mtime_ns FROM archives WHERE path = ?", (key,)
+            ).fetchone()
+        return (int(row[0]), int(row[1])) if row is not None else None
+
+    def metadata(self, path: Path) -> dict[str, str] | None:
+        """A book's ComicInfo fields, {} if it has none, None if never read."""
+        key = str(Path(path).resolve())
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT comicinfo FROM archives WHERE path = ?", (key,)
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        try:
+            raw = json.loads(row[0])
+        except ValueError:
+            return None
+        if not isinstance(raw, dict):
+            return None
+        return {str(k): str(v) for k, v in raw.items()}
+
+    def set_metadata(self, path: Path, meta: dict[str, str]) -> None:
+        key = str(Path(path).resolve())
+        with self._lock, self.conn:
+            self.conn.execute(
+                "UPDATE archives SET comicinfo = ? WHERE path = ?", (json.dumps(meta), key)
+            )
+
+    def _copy_metadata(self, old: str, key: str) -> None:
+        self.conn.execute(
+            "UPDATE archives SET comicinfo = "
+            "(SELECT comicinfo FROM archives WHERE path = ?) WHERE path = ?",
+            (old, key),
+        )
 
     def put(self, path: Path, size: int, mtime_ns: int, pages: list[PageEntry]) -> None:
         key = str(Path(path).resolve())
@@ -355,24 +404,42 @@ class HashCache:
             self.conn.execute("DELETE FROM ignored WHERE gid = ?", (gid,))
             self.conn.execute("DELETE FROM ignored_hashes WHERE gid = ?", (gid,))
 
+    def ignored_hash_map(self) -> dict[str, set[int]]:
+        """Every ignore action's hashes, by its id (its gid, for older rows)."""
+        with self._lock:
+            found: dict[str, set[int]] = {}
+            for gid, dhash in self.conn.execute("SELECT gid, dhash FROM ignored_hashes"):
+                found.setdefault(gid, set()).add(_to_unsigned(dhash))
+            for (gid,) in self.conn.execute("SELECT gid FROM ignored"):
+                if gid not in found:
+                    with contextlib.suppress(ValueError):
+                        found[gid] = {int(gid, 16)}
+        return found
+
     def clear_ignored(self) -> None:
         with self._lock, self.conn:
             self.conn.execute("DELETE FROM ignored")
             self.conn.execute("DELETE FROM ignored_hashes")
 
     # -- known junk --------------------------------------------------------
-    def known_hashes(self) -> set[int]:
+    def known_hashes(self, *, source: str | None = None) -> set[int]:
+        """Every remembered hash, or only those from entries of one `source`."""
         with self._lock:
-            return {
-                _to_unsigned(r[0])
-                for r in self.conn.execute("SELECT dhash FROM known_hashes")
-            }
+            if source is None:
+                rows = self.conn.execute("SELECT dhash FROM known_hashes")
+            else:
+                rows = self.conn.execute(
+                    "SELECT h.dhash FROM known_hashes h JOIN known k ON k.sid = h.sid "
+                    "WHERE k.source = ?",
+                    (source,),
+                )
+            return {_to_unsigned(r[0]) for r in rows}
 
     def known_entries(self) -> list[KnownEntry]:
         """Everything remembered, most recent first."""
         with self._lock:
             rows = self.conn.execute(
-                "SELECT sid, note, source, created_at, thumbnail FROM known "
+                "SELECT sid, note, source, created_at, thumbnail, tags FROM known "
                 "ORDER BY created_at DESC, sid"
             ).fetchall()
             hashes: dict[str, set[int]] = {}
@@ -382,7 +449,7 @@ class HashCache:
             KnownEntry(
                 sid=r[0], note=r[1] or "", source=r[2], created_at=float(r[3]),
                 thumbnail=bytes(r[4]) if r[4] is not None else None,
-                hashes=hashes.get(r[0], set()),
+                hashes=hashes.get(r[0], set()), tags=r[5] or "",
             )
             for r in rows
         ]
@@ -395,6 +462,7 @@ class HashCache:
         note: str = "",
         thumbnail: bytes | None = None,
         source: str = "removed",
+        tags: str = "",
     ) -> bool:
         """Add a piece of known junk, merging with an entry of the same id.
 
@@ -404,22 +472,33 @@ class HashCache:
         """
         with self._lock, self.conn:
             existing = self.conn.execute(
-                "SELECT thumbnail FROM known WHERE sid = ?", (sid,)
+                "SELECT thumbnail, tags FROM known WHERE sid = ?", (sid,)
             ).fetchone()
             if existing is None:
                 self.conn.execute(
-                    "INSERT INTO known(sid, note, source, thumbnail) VALUES (?, ?, ?, ?)",
-                    (sid, note, source, thumbnail),
+                    "INSERT INTO known(sid, note, source, thumbnail, tags) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (sid, note, source, thumbnail, tags),
                 )
-            elif existing[0] is None and thumbnail is not None:
-                self.conn.execute(
-                    "UPDATE known SET thumbnail = ? WHERE sid = ?", (thumbnail, sid)
-                )
+            else:
+                if existing[0] is None and thumbnail is not None:
+                    self.conn.execute(
+                        "UPDATE known SET thumbnail = ? WHERE sid = ?", (thumbnail, sid)
+                    )
+                if not existing[1] and tags:
+                    self.conn.execute("UPDATE known SET tags = ? WHERE sid = ?", (tags, sid))
             self.conn.executemany(
                 "INSERT OR IGNORE INTO known_hashes(sid, dhash) VALUES (?, ?)",
                 [(sid, _to_signed(h)) for h in set(hashes)],
             )
         return existing is None
+
+    def describe_known(self, sid: str, *, note: str, tags: str) -> None:
+        """Rewrite the note and tags of one remembered page."""
+        with self._lock, self.conn:
+            self.conn.execute(
+                "UPDATE known SET note = ?, tags = ? WHERE sid = ?", (note, tags, sid)
+            )
 
     def forget(self, sid: str) -> None:
         with self._lock, self.conn:
@@ -447,11 +526,18 @@ class HashCache:
         return run_id
 
     def run_rows(self) -> list[tuple]:
-        """(id, started_at, source) for every run, newest first."""
+        """(id, started_at, source, pinned) for every run, newest first."""
         with self._lock:
             return self.conn.execute(
-                "SELECT id, started_at, source FROM runs ORDER BY started_at DESC, id DESC"
+                "SELECT id, started_at, source, pinned FROM runs "
+                "ORDER BY started_at DESC, id DESC"
             ).fetchall()
+
+    def set_run_pinned(self, run_id: int, pinned: bool) -> None:
+        with self._lock, self.conn:
+            self.conn.execute(
+                "UPDATE runs SET pinned = ? WHERE id = ?", (int(pinned), run_id)
+            )
 
     def run_item_rows(self) -> list[tuple]:
         with self._lock:

@@ -28,6 +28,9 @@ class Decision(enum.Enum):
     DELETE = "delete"
     KEEP = "keep"
     IGNORE = "ignore"  # keep, and never surface this group again
+    # Come back to it later. Not a keep: nothing is remembered about the page, and
+    # the group stays in the list, but "next undecided" steps over it.
+    DEFER = "defer"
 
 
 class MatchKind(enum.Enum):
@@ -70,10 +73,23 @@ class ArchiveInfo:
     page_count: int = 0
     pages: list[PageEntry] = field(default_factory=list)
     error: str | None = None
+    # Came straight from the hash cache, with no page decoded; see ScanStats.
+    cached: bool = False
+    # From ComicInfo.xml, when the book has one; empty otherwise.
+    series: str = ""
+    number: str = ""
+    title: str = ""
 
     @property
     def readable(self) -> bool:
         return self.error is None
+
+    @property
+    def display_name(self) -> str:
+        """"Series #Number" when ComicInfo names the series, else the file name."""
+        if not self.series:
+            return self.path.name
+        return f"{self.series} #{self.number}" if self.number else self.series
 
 
 @dataclass(slots=True)

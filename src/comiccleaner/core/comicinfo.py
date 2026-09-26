@@ -83,6 +83,36 @@ def _serialise_namespaced(root: ET.Element, text: str) -> bytes:
         registry.update(saved)
 
 
+# What the library shows from ComicInfo.xml, by element name.
+METADATA_FIELDS = ("Series", "Number", "Title")
+
+# A ComicInfo.xml is a few kilobytes; anything far bigger is not worth parsing.
+_MAX_METADATA_BYTES = 4 * 1024 * 1024
+
+
+def read_metadata(xml_bytes: bytes) -> dict[str, str]:
+    """Series, Number and Title from a ComicInfo.xml, matched by local name.
+
+    Only direct children of the root count, whatever their namespace. A broken
+    or oversized document gives an empty dict: metadata is a nicety, never a
+    reason to fail a scan.
+    """
+    if len(xml_bytes) > _MAX_METADATA_BYTES:
+        return {}
+    try:
+        root = ET.fromstring(xml_bytes.decode("utf-8-sig", errors="replace"))
+    except ET.ParseError as exc:
+        log.debug("ComicInfo.xml is not valid XML (%s); no metadata read", exc)
+        return {}
+    found: dict[str, str] = {}
+    for name in METADATA_FIELDS:
+        element = _child(root, name)
+        text = (element.text or "").strip() if element is not None else ""
+        if text:
+            found[name.lower()] = " ".join(text.split())[:200]
+    return found
+
+
 def update_comicinfo(
     xml_bytes: bytes, removed_indices: set[int], new_page_count: int
 ) -> bytes:

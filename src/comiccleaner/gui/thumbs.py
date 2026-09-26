@@ -21,6 +21,9 @@ log = logging.getLogger(__name__)
 
 THUMB_SIZE = 180
 
+# The sizes Settings offers, as (label, pixels); Medium is THUMB_SIZE.
+THUMB_SIZES = (("Small", 120), ("Medium", THUMB_SIZE), ("Large", 240))
+
 # Opening a cbr extracts the whole archive to a temp folder, so keeping a few
 # handles alive makes browsing a group of pages from one book far cheaper.
 _MAX_OPEN_ARCHIVES = 4
@@ -53,13 +56,16 @@ class ArchivePool:
 
 
 class _ThumbSignals(QObject):
-    # PNG bytes, not a QPixmap: pixmaps may only be made on the UI thread.
-    ready = Signal(str, bytes)
+    # PNG bytes, not a QPixmap: pixmaps may only be made on the UI thread. The
+    # size it was made at comes along, so one made before a resize is dropped.
+    ready = Signal(str, bytes, int)
     failed = Signal(str, str)
 
 
 class _ThumbJob(QRunnable):
-    def __init__(self, pool: ArchivePool, key: str, page: PageEntry, parent: QObject) -> None:
+    def __init__(
+        self, pool: ArchivePool, key: str, page: PageEntry, parent: QObject, size: int
+    ) -> None:
         super().__init__()
         # Owned by the cache, which disposes of it once the answer is in: a runnable
         # cannot own a QObject, and an unparented one would outlive every job.
@@ -67,18 +73,19 @@ class _ThumbJob(QRunnable):
         self._pool = pool
         self._key = key
         self._page = page
+        self._size = size
 
     def run(self) -> None:  # executed on a pool thread
         try:
             data = self._pool.read(self._page.archive, self._page.name)
-            png = make_thumbnail(data, THUMB_SIZE)
+            png = make_thumbnail(data, self._size)
         except (ArchiveError, OSError, ValueError) as exc:
             self.signals.failed.emit(self._key, str(exc))
             return
         except Exception as exc:  # Pillow can raise almost anything on bad scans
             self.signals.failed.emit(self._key, str(exc))
             return
-        self.signals.ready.emit(self._key, png)
+        self.signals.ready.emit(self._key, png, self._size)
 
 
 class _PageSignals(QObject):
@@ -149,8 +156,11 @@ class ThumbnailCache(QObject):
     page_loaded = Signal(str, object, str)
     task_done = Signal(str, object, str)
 
-    def __init__(self, parent: QObject | None = None, capacity: int = 600) -> None:
+    def __init__(
+        self, parent: QObject | None = None, capacity: int = 600, size: int = THUMB_SIZE
+    ) -> None:
         super().__init__(parent)
+        self.size = size
         self._cache: OrderedDict[str, QPixmap] = OrderedDict()
         self._pending: set[str] = set()
         # The signals object of every job still queued or running, by key, so it
@@ -164,7 +174,16 @@ class ThumbnailCache(QObject):
         # single worker thread keeps ordering predictable and memory flat.
         self._threads = QThreadPool(self)
         self._threads.setMaxThreadCount(1)
-        self._placeholder = _make_placeholder()
+        self._placeholder = _make_placeholder(size)
+
+    def set_size(self, size: int) -> None:
+        """Make thumbnails at a new size from now on, forgetting every old one."""
+        if size == self.size:
+            return
+        self.release_archives()  # drops queued jobs, which would answer at the old size
+        self.size = size
+        self._cache.clear()
+        self._placeholder = _make_placeholder(size)
 
     @staticmethod
     def key_for(page: PageEntry) -> str:
@@ -179,7 +198,7 @@ class ThumbnailCache(QObject):
             return cached
         if key not in self._pending:
             self._pending.add(key)
-            job = _ThumbJob(self._pool, key, page, self)
+            job = _ThumbJob(self._pool, key, page, self, self.size)
             job.signals.ready.connect(self._on_ready)
             job.signals.failed.connect(self._on_failed)
             self._jobs[key] = job.signals
@@ -229,7 +248,9 @@ class ThumbnailCache(QObject):
             log.debug("page load failed for %s: %s", key, error)
         self.page_loaded.emit(key, image, error)
 
-    def _on_ready(self, key: str, png: bytes) -> None:
+    def _on_ready(self, key: str, png: bytes, size: int) -> None:
+        if size != self.size:
+            return  # queued before set_size; the job at the new size answers instead
         # Runs on the UI thread, the only place a QPixmap may be created.
         pixmap = QPixmap()
         if not pixmap.loadFromData(png):  # Qt recognises the PNG by itself
@@ -276,7 +297,7 @@ class ThumbnailCache(QObject):
         self.release_archives()
 
 
-def _make_placeholder() -> QPixmap:
-    pixmap = QPixmap(THUMB_SIZE, THUMB_SIZE)
+def _make_placeholder(size: int = THUMB_SIZE) -> QPixmap:
+    pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     return pixmap

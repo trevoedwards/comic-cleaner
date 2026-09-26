@@ -1,4 +1,4 @@
-"""Light / dark / follow-system appearance."""
+"""Light / dark / high contrast / follow-system appearance."""
 
 from __future__ import annotations
 
@@ -20,10 +20,21 @@ class Theme(enum.Enum):
     SYSTEM = "system"
     LIGHT = "light"
     DARK = "dark"
+    # Pure white or pure black, whichever the OS prefers, with the usual colours
+    # for removal and keeping so their meaning does not change.
+    CONTRAST = "contrast"
 
     @property
     def label(self) -> str:
-        return {"system": "Follow system", "light": "Light", "dark": "Dark"}[self.value]
+        return {
+            "system": "Follow system", "light": "Light", "dark": "Dark",
+            "contrast": "High contrast",
+        }[self.value]
+
+    @property
+    def follows_system(self) -> bool:
+        """Whether the OS light/dark preference decides how this theme looks."""
+        return self in (Theme.SYSTEM, Theme.CONTRAST)
 
     @classmethod
     def parse(cls, value: object) -> Theme:
@@ -88,12 +99,16 @@ def apply_theme(theme: Theme) -> None:
                 Theme.LIGHT: Qt.ColorScheme.Light,
                 Theme.DARK: Qt.ColorScheme.Dark,
                 Theme.SYSTEM: Qt.ColorScheme.Unknown,
+                Theme.CONTRAST: Qt.ColorScheme.Unknown,
             }[theme]
         )
 
-    dark = system_is_dark() if theme is Theme.SYSTEM else theme is Theme.DARK
+    dark = system_is_dark() if theme.follows_system else theme is Theme.DARK
 
-    app.setPalette(_dark_palette() if dark else _light_palette())
+    if theme is Theme.CONTRAST:
+        app.setPalette(_contrast_palette(dark))
+    else:
+        app.setPalette(_dark_palette() if dark else _light_palette())
     _is_dark = dark
 
 
@@ -153,6 +168,33 @@ def _dark_palette() -> QPalette:
             QPalette.ColorRole.Link: QColor(110, 170, 240),
         },
         QColor(128, 128, 134),
+    )
+
+
+def _contrast_palette(dark: bool) -> QPalette:
+    """Black on white, or white on black, with nothing in between to squint at."""
+    ink = QColor(255, 255, 255) if dark else QColor(0, 0, 0)
+    paper = QColor(0, 0, 0) if dark else QColor(255, 255, 255)
+    highlight = QColor(255, 255, 0) if dark else QColor(0, 0, 160)
+    return _build(
+        {
+            QPalette.ColorRole.Window: paper,
+            QPalette.ColorRole.WindowText: ink,
+            QPalette.ColorRole.Base: paper,
+            QPalette.ColorRole.AlternateBase: paper,
+            QPalette.ColorRole.Text: ink,
+            QPalette.ColorRole.Button: paper,
+            QPalette.ColorRole.ButtonText: ink,
+            QPalette.ColorRole.ToolTipBase: paper,
+            QPalette.ColorRole.ToolTipText: ink,
+            QPalette.ColorRole.Mid: ink,
+            QPalette.ColorRole.Light: ink,
+            QPalette.ColorRole.Dark: ink,
+            QPalette.ColorRole.Highlight: highlight,
+            QPalette.ColorRole.HighlightedText: paper,
+            QPalette.ColorRole.Link: highlight,
+        },
+        QColor(128, 128, 128),
     )
 
 

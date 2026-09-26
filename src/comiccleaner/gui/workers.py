@@ -18,7 +18,7 @@ from ..core.remover import (
     RemovalReport,
     apply_removals,
 )
-from ..core.scanner import scan_archives
+from ..core.scanner import ScanStats, Survey, scan_archives, survey
 from ..core.signatures import capture_samples, learn_from_run
 from ..core.updates import UpdateCheckError, latest_release
 from ..crashlog import write_report
@@ -63,10 +63,46 @@ class UpdateChecker(QObject):
             self.finished.emit(release, error)
 
 
+class SurveyWorker(QThread):
+    """Walks dropped folders for archives, so a big share never freezes the window."""
+
+    entered = Signal(str)  # each folder as the walk reaches it
+    finished_survey = Signal(object)  # the Survey
+    failed = Signal(str)
+
+    def __init__(
+        self, paths: list[Path], exclude: list[str], parent: QObject | None = None
+    ) -> None:
+        super().__init__(parent)
+        self._paths = paths
+        self._exclude = exclude
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        try:
+            result: Survey = survey(
+                self._paths,
+                exclude=self._exclude,
+                progress=lambda folder: self.entered.emit(str(folder)),
+                should_cancel=lambda: self._cancelled,
+            )
+        except Exception as exc:
+            log.exception("folder walk crashed")
+            _record(exc, "SurveyWorker")
+            self.failed.emit(str(exc))
+            return
+        self.finished_survey.emit(result)
+
+
 class ScanWorker(QThread):
     """Hashes every page of the given archives without blocking the UI."""
 
     progressed = Signal(int, int, str)
+    # Pages hashed, pages from the cache and the time left, in words.
+    stats_changed = Signal(str)
     finished_scan = Signal(list)
     failed = Signal(str)
 
@@ -74,12 +110,17 @@ class ScanWorker(QThread):
         self,
         paths: list[Path],
         cache: HashCache | None = None,
-        parent: object | None = None,
+        parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._paths = paths
         self._cache = cache
         self._cancelled = False
+        self.stats = ScanStats(len(paths))
+
+    def _record_one(self, info: ArchiveInfo) -> None:
+        self.stats.record(info)
+        self.stats_changed.emit(self.stats.describe())
 
     def cancel(self) -> None:
         self._cancelled = True
@@ -91,6 +132,7 @@ class ScanWorker(QThread):
                 cache=self._cache,
                 progress=lambda done, total, name: self.progressed.emit(done, total, name),
                 should_cancel=lambda: self._cancelled,
+                on_archive=self._record_one,
             )
         except Exception as exc:
             log.exception("scan worker crashed")
@@ -115,9 +157,10 @@ class RemovalWorker(QThread):
         output_dir: Path | None = None,
         dry_run: bool = False,
         compress: bool = False,
+        quarantine: Path | None = None,
         learn: list[DuplicateGroup] | None = None,
         cache: HashCache | None = None,
-        parent: object | None = None,
+        parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._plans = plans
@@ -125,6 +168,7 @@ class RemovalWorker(QThread):
         self._output_dir = output_dir
         self._dry_run = dry_run
         self._compress = compress
+        self._quarantine = quarantine
         # Groups to remember as known junk once they are really gone.
         self._learn = [] if dry_run or cache is None else list(learn or [])
         # Also where the run is recorded, so it can be undone from History.
@@ -145,6 +189,7 @@ class RemovalWorker(QThread):
                 output_dir=self._output_dir,
                 dry_run=self._dry_run,
                 compress=self._compress,
+                quarantine=self._quarantine,
                 progress=lambda done, total, name: self.progressed.emit(done, total, name),
                 should_cancel=lambda: self._cancelled,
             )

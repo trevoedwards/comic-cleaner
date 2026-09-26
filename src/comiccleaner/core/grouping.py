@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .hashing import DHASH_BITS, hamming_matrix
+from .hashing import DHASH_BITS, hamming, hamming_matrix
 from .model import ArchiveInfo, Decision, DuplicateGroup, MatchKind, PageEntry
 
 log = logging.getLogger(__name__)
@@ -23,8 +23,9 @@ _BRUTE_FORCE_LIMIT = 4000
 
 # "Near the start or end of a book", in pages. Credits follow the cover and
 # adverts are tacked on at the back, so anything this close to either edge is
-# where junk is expected to be.
+# where junk is expected to be. The default; GroupingOptions.edge_pages sets it.
 EDGE_PAGES = 3
+MAX_EDGE_PAGES = 10
 
 # Loosest similarity either front end allows. Above roughly a quarter of the 64
 # bits, "similar" stops meaning anything.
@@ -44,6 +45,8 @@ class GroupingOptions:
     include_flat: bool = False  # surface blank/solid-colour pages
     skip_first_page: bool = True    # never group a book's cover
     skip_last_page: bool = False
+    # What counts as "near the edge" when ranking groups and warning about them.
+    edge_pages: int = EDGE_PAGES
 
 
 class _UnionFind:
@@ -164,12 +167,24 @@ def near_edge(page: PageEntry, page_count: int, edge: int = EDGE_PAGES) -> bool:
     return page.index < edge or page.index >= page_count - edge
 
 
-def edge_share(pages: Iterable[PageEntry], page_counts: dict) -> float:
+def edge_share(
+    pages: Iterable[PageEntry], page_counts: dict, edge: int = EDGE_PAGES
+) -> float:
     listed = list(pages)
     if not listed:
         return 1.0
-    near = sum(near_edge(p, page_counts.get(p.archive, 0)) for p in listed)
+    near = sum(near_edge(p, page_counts.get(p.archive, 0), edge) for p in listed)
     return near / len(listed)
+
+
+# The warnings review_warnings() can give, so the GUI can explain them without
+# matching on the wording.
+WARN_BLANK = "Contains blank or solid-colour pages."
+WARN_ONE_BOOK = "All copies are in one book — this may be intentional."
+WARN_COVER = "Includes a first page, which is usually the cover."
+WARN_MID_BOOK = (
+    "Every copy sits mid-book; adverts and credits usually sit near the start or end."
+)
 
 
 def review_warnings(group: DuplicateGroup) -> list[str]:
@@ -180,16 +195,30 @@ def review_warnings(group: DuplicateGroup) -> list[str]:
     """
     warnings = []
     if any(p.flat for p in group.pages):
-        warnings.append("Contains blank or solid-colour pages.")
+        warnings.append(WARN_BLANK)
     if group.archive_count == 1 and not group.known:
-        warnings.append("All copies are in one book — this may be intentional.")
+        warnings.append(WARN_ONE_BOOK)
     if any(p.index == 0 for p in group.pages):
-        warnings.append("Includes a first page, which is usually the cover.")
+        warnings.append(WARN_COVER)
     if group.edge_share == 0:
-        warnings.append(
-            "Every copy sits mid-book; adverts and credits usually sit near the start or end."
-        )
+        warnings.append(WARN_MID_BOOK)
     return warnings
+
+
+def spread(group: DuplicateGroup) -> int:
+    """Bits between the reference image and the copy furthest from it.
+
+    Zero for an identical group. A large spread means single-linkage chained in
+    a page that only resembles its neighbour, so it is worth a closer look.
+    """
+    reference = group.representative.dhash
+    return max((hamming(p.dhash, reference) for p in group.pages), default=0)
+
+
+def matches_any(hashes: Iterable[int], targets: Collection[int], threshold: int) -> bool:
+    """Whether any of `hashes` lies within `threshold` of any of `targets`."""
+    values = np.array(sorted(set(hashes)), dtype=np.uint64)
+    return bool(_near(values, targets, threshold).any())
 
 
 def is_safe(group: DuplicateGroup, min_books: int = 2) -> bool:
@@ -280,7 +309,7 @@ def build_groups(
         groups.append(
             DuplicateGroup(
                 gid=gid, kind=kind, pages=members, known=is_known,
-                edge_share=edge_share(members, page_counts),
+                edge_share=edge_share(members, page_counts, opts.edge_pages),
             )
         )
 
@@ -306,12 +335,20 @@ def _group_rank(group: DuplicateGroup) -> tuple:
 
 
 def sort_groups(groups: list[DuplicateGroup], key: str) -> list[DuplicateGroup]:
-    """Re-sort for the UI. `key` is one of: books, space, count, size."""
+    """Re-sort for the UI.
+
+    `key` is one of: books, space, count, size, warning (groups with a warning
+    first), edge (most copies near the start or end first) or distance (the
+    widest similar groups first; identical groups count as 0).
+    """
     keyfns = {
         "books": lambda g: (g.archive_count, g.edge_share, g.recoverable_bytes),
         "space": lambda g: (g.recoverable_bytes, g.archive_count),
         "count": lambda g: (g.page_count, g.recoverable_bytes),
         "size": lambda g: (g.representative.width * g.representative.height,),
+        "warning": lambda g: (bool(review_warnings(g)), g.archive_count, g.recoverable_bytes),
+        "edge": lambda g: (g.edge_share, g.archive_count, g.recoverable_bytes),
+        "distance": lambda g: (spread(g), g.archive_count, g.recoverable_bytes),
     }
     fn = keyfns.get(key, keyfns["books"])
     return sorted(groups, key=fn, reverse=True)

@@ -79,9 +79,10 @@ class WelcomePanel(QWidget):
         body.addLayout(buttons)
 
         self.steps = QLabel(
-            "1. Import  →  2. Scan  →  3. Review what repeats  →  4. Apply, with a dry run"
-            " and backups"
+            "1. Add a folder  →  2. Scan  →  3. Mark safe, then review the rest  →  "
+            "4. Apply as a dry run first; backups are kept"
         )
+        self.steps.setWordWrap(True)
         self.steps.setAlignment(Qt.AlignmentFlag.AlignCenter)
         body.addWidget(self.steps)
 

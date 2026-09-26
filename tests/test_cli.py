@@ -552,3 +552,156 @@ def test_edges_must_be_positive(library, cache_file):
     with pytest.raises(SystemExit) as exited:
         run("clean", str(library), "--cache", cache_file, "--all", "--edges", "0")
     assert exited.value.code == 2
+
+
+# -- plans, quarantine, excludes and the edge window -----------------------
+
+
+def test_a_dry_run_can_write_its_plan_and_changes_nothing(library, cache_file, tmp_path):
+    plan = tmp_path / "plan.json"
+    code, out, _ = run(
+        "clean", str(library), "--cache", cache_file, "--all", "--dry-run",
+        "--threshold", "8", "--plan", str(plan),
+    )
+
+    assert code == cli.EXIT_OK
+    assert f"Wrote the plan for 3 book(s) to {plan}" in out
+    payload = json.loads(plan.read_text(encoding="utf-8"))
+    assert payload["dry_run"] is True
+    assert sorted(Path(b["archive"]).name for b in payload["books"]) == sorted(ORIGINAL)
+    assert all(b["percent"] == 20.0 and b["status"] == "planned" for b in payload["books"])
+    assert _counts(library) == ORIGINAL
+
+
+def test_plan_lines_name_the_share_and_the_pages(library, cache_file):
+    _, out, _ = run(
+        "clean", str(library), "--cache", cache_file, "--all", "--dry-run", "--threshold", "8"
+    )
+    assert "Book 01.cbz: removing 1 of 5 (20%), 4 left: page002.jpg" in out
+
+
+def test_clean_can_quarantine_what_it_removes(library, cache_file, tmp_path):
+    quarantine = tmp_path / "removed"
+    code, out, _ = run(
+        "clean", str(library), "--cache", cache_file, "--all", "--yes", "--json",
+        "--quarantine", str(quarantine),
+    )
+
+    assert code == cli.EXIT_OK
+    results = json.loads(out)["results"]
+    assert sorted(Path(r["quarantined"][0]).parent.name for r in results) == [
+        "Book 01", "Book 02",
+    ]
+    assert sorted(p.name for p in quarantine.rglob("*.jpg")) == ["page002.jpg", "page002.jpg"]
+
+
+def test_exclude_leaves_matching_books_out(library, cache_file):
+    code, out, _ = run(
+        "scan", str(library), "--cache", cache_file, "--json", "--exclude", "*03*",
+    )
+    assert code == cli.EXIT_OK
+    assert json.loads(out)["library"]["archives"] == 2
+
+
+def test_the_edge_window_changes_what_counts_as_mid_book(tmp_path, cache_file):
+    library = _ad_mid_and_at_end(tmp_path / "lib")
+    _, out, _ = run("scan", str(library), "--cache", cache_file, "--json", "--edge-window", "5")
+    [group] = json.loads(out)["groups"]
+    assert group["edge_share"] == 1.0
+
+    with pytest.raises(SystemExit) as exited:
+        run("scan", str(library), "--cache", cache_file, "--edge-window", "11")
+    assert exited.value.code == 2
+
+
+def test_pdfs_are_named_as_unsupported(library, cache_file):
+    (library / "Extra.pdf").write_bytes(b"%PDF-1.7")
+    code, _, err = run("scan", str(library), "--cache", cache_file)
+    assert code == cli.EXIT_OK
+    assert "Skipping 1 PDF file(s): PDF is not supported." in err
+
+
+def _duplicated_issue(root: Path) -> Path:
+    story = [make_page(seed=700 + i) for i in range(6)]
+    write_archive(root / "Issue 1.cbz", story)
+    write_archive(root / "Issue 1 again.cbz", story)
+    return root
+
+
+def test_scan_reports_books_that_are_the_same_issue(tmp_path, cache_file):
+    library = _duplicated_issue(tmp_path / "lib")
+
+    _, out, _ = run("scan", str(library), "--cache", cache_file, "--json")
+    [pair] = json.loads(out)["duplicate_books"]
+    assert {Path(pair["smaller"]).name, Path(pair["larger"]).name} == {
+        "Issue 1.cbz", "Issue 1 again.cbz",
+    }
+    assert pair["overlap"] == 1.0
+
+    _, text, _ = run("scan", str(library), "--cache", cache_file)
+    assert "1 pair(s) of books look like the same issue twice" in text
+    assert "Issue 1 again.cbz  ~  Issue 1.cbz" in text
+
+
+def test_clean_says_a_cbr_becomes_a_cbz(tmp_path, cache_file, monkeypatch):
+    from comiccleaner.core import remover
+
+    library = tmp_path / "lib"
+    ad = make_page(seed=31)
+    for number, name in enumerate(("A.cbr", "B.cbz")):
+        story = [make_page(seed=number * 10 + i) for i in range(4)]
+        write_archive(library / name, [story[0], ad, *story[1:]])
+    # A is a zip named .cbr, as plenty are; stand in for a real RAR here.
+    monkeypatch.setattr(
+        remover.RemovalPlan, "converts", property(lambda self: self.archive.suffix == ".cbr")
+    )
+
+    _, out, _ = run("clean", str(library), "--cache", cache_file, "--all", "--dry-run")
+
+    assert "1 .cbr/.cb7 book(s) cannot be written in that format" in out
+    assert "the original, which is kept as the backup" in out
+
+
+# -- review packs ----------------------------------------------------------
+
+
+def test_pack_export_and_import(tmp_path):
+    source = HashCache(tmp_path / "a.sqlite")
+    source.remember("00000000000000ab", {0xAB}, note="an advert")
+    source.ignore("00000000000000cd", {0xCD}, note="a recap")
+    source.close()
+    pack = tmp_path / "pack.json"
+
+    code, out, _ = run("pack", "--cache", str(tmp_path / "a.sqlite"), "export", str(pack))
+    assert code == cli.EXIT_OK
+    assert "1 remembered page(s) and 1 ignored page(s)" in out
+    assert json.loads(pack.read_text(encoding="utf-8"))["settings"] is None
+
+    code, out, _ = run("pack", "--cache", str(tmp_path / "b.sqlite"), "import", str(pack))
+    assert code == cli.EXIT_OK
+    assert "Known junk: added 1" in out and "Ignored: added 1" in out
+    target = HashCache(tmp_path / "b.sqlite")
+    try:
+        assert target.known_hashes() == {0xAB}
+        assert target.ignored_hashes() == {0xCD}
+    finally:
+        target.close()
+
+
+def test_pack_import_mentions_settings_it_cannot_apply(tmp_path):
+    pack = tmp_path / "pack.json"
+    pack.write_text(json.dumps({
+        "format": "comiccleaner-review-pack", "version": 1,
+        "settings": {"threshold": 4}, "known": [], "ignored": [],
+    }), encoding="utf-8")
+    code, out, _ = run("pack", "--cache", str(tmp_path / "c.sqlite"), "import", str(pack))
+    assert code == cli.EXIT_OK
+    assert "apply to the GUI only" in out
+
+
+def test_a_bad_pack_is_refused(tmp_path):
+    pack = tmp_path / "pack.json"
+    pack.write_text("{}", encoding="utf-8")
+    code, _, err = run("pack", "--cache", str(tmp_path / "c.sqlite"), "import", str(pack))
+    assert code == cli.EXIT_REFUSED
+    assert "Nothing was imported" in err

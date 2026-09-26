@@ -11,8 +11,10 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
     QFileDialog,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -22,13 +24,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..core.cache import HashCache, IgnoredEntry
+from ..core.cache import HashCache, IgnoredEntry, KnownEntry
 from ..core.model import PageEntry
 from ..core.signatures import SignatureFileError, export_known, import_known
 from .thumbs import ThumbnailCache
 
 ROLE_ID = Qt.ItemDataRole.UserRole + 1
 ROLE_THUMB_KEY = Qt.ItemDataRole.UserRole + 2
+# Lower-case note, tags and id, for the search box.
+ROLE_SEARCH = Qt.ItemDataRole.UserRole + 3
 
 ICON_SIZE = 120
 FILE_FILTER = "Known junk lists (*.json)"
@@ -119,6 +123,7 @@ class RememberedDialog(QDialog):
         self._cache = cache
         self._thumbs = thumbs
         self.changed = False
+        self._known: dict[str, KnownEntry] = {}
 
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
@@ -130,11 +135,39 @@ class RememberedDialog(QDialog):
             "list to share it, or import someone else's.",
             "Nothing remembered yet. Pages are added here when you remove them.",
         )
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search notes, tags and ids")
+        self.search.setClearButtonEnabled(True)
+        self.search.setAccessibleName("Search known junk")
+        self.search.textChanged.connect(self._apply_search)
+        known_layout = self.known.layout()
+        assert isinstance(known_layout, QVBoxLayout)
+        known_layout.insertWidget(1, self.search)
+
+        # Describe the one selected entry, so a long list stays searchable.
+        editor = QWidget()
+        form = QFormLayout(editor)
+        form.setContentsMargins(0, 0, 0, 0)
+        self.note_edit = QLineEdit()
+        self.note_edit.setMaxLength(200)
+        self.tags_edit = QLineEdit()
+        self.tags_edit.setMaxLength(200)
+        self.tags_edit.setPlaceholderText("e.g. credits, scanlator name")
+        self.btn_save_note = QPushButton("Save")
+        self.btn_save_note.clicked.connect(lambda: self.save_description())
+        tags_row = QHBoxLayout()
+        tags_row.addWidget(self.tags_edit, 1)
+        tags_row.addWidget(self.btn_save_note)
+        form.addRow("Note:", self.note_edit)
+        form.addRow("Tags:", tags_row)
+        known_layout.insertWidget(known_layout.count() - 1, editor)
+
         self.btn_forget = self.known.button("Forget selected", self.forget_selected)
         self.btn_forget_all = self.known.button("Forget all", self.forget_all)
         self.btn_import = self.known.button("Import...", self.import_list, stretch_before=True)
         self.btn_export = self.known.button("Export...", self.export_list)
         self.known.listing.itemSelectionChanged.connect(self._update_buttons)
+        self.known.listing.itemSelectionChanged.connect(self._load_description)
         self.tabs.addTab(self.known, "Known junk")
 
         self.ignored = _Tab(
@@ -164,17 +197,21 @@ class RememberedDialog(QDialog):
         self._populate_known()
         self._populate_ignored()
         self._update_buttons()
+        self._load_description()
 
     def _populate_known(self) -> None:
         listing = self.known.listing
         listing.clear()
-        for entry in self._cache.known_entries():
+        self._known = {entry.sid: entry for entry in self._cache.known_entries()}
+        for entry in self._known.values():
             origin = (
                 "imported" if entry.source == "imported"
                 else f"removed {_date(entry.created_at)}"
             )
-            item = QListWidgetItem(f"{entry.note or 'Known junk'}\n{origin}")
+            tags = f"\n{entry.tags}" if entry.tags else ""
+            item = QListWidgetItem(f"{entry.note or 'Known junk'}\n{origin}{tags}")
             item.setData(ROLE_ID, entry.sid)
+            item.setData(ROLE_SEARCH, f"{entry.note} {entry.tags} {entry.sid}".lower())
             pixmap = QPixmap()
             if entry.thumbnail and pixmap.loadFromData(entry.thumbnail):
                 item.setIcon(QIcon(pixmap))
@@ -183,6 +220,7 @@ class RememberedDialog(QDialog):
             item.setToolTip(f"{len(entry.hashes)} hash(es), id {entry.sid}")
             listing.addItem(item)
         self.known.finish()
+        self._apply_search()
 
     def _populate_ignored(self) -> None:
         listing = self.ignored.listing
@@ -202,6 +240,42 @@ class RememberedDialog(QDialog):
                 item.setToolTip("The book this was ignored from is no longer available.")
             listing.addItem(item)
         self.ignored.finish()
+
+    def _apply_search(self) -> None:
+        needle = self.search.text().strip().lower()
+        listing = self.known.listing
+        for row in range(listing.count()):
+            item = listing.item(row)
+            hidden = bool(needle) and needle not in str(item.data(ROLE_SEARCH) or "")
+            item.setHidden(hidden)
+            if hidden and item.isSelected():
+                item.setSelected(False)
+
+    def _selected_known(self) -> KnownEntry | None:
+        chosen = self.known.selected_ids()
+        return self._known.get(chosen[0]) if len(chosen) == 1 else None
+
+    def _load_description(self) -> None:
+        entry = self._selected_known()
+        for edit in (self.note_edit, self.tags_edit):
+            edit.setEnabled(entry is not None)
+        self.btn_save_note.setEnabled(entry is not None)
+        self.note_edit.setText(entry.note if entry else "")
+        self.tags_edit.setText(entry.tags if entry else "")
+
+    def save_description(self) -> None:
+        """Store the note and tags typed for the selected entry."""
+        entry = self._selected_known()
+        if entry is None:
+            return
+        self._cache.describe_known(
+            entry.sid, note=self.note_edit.text().strip(), tags=self.tags_edit.text().strip()
+        )
+        self._populate_known()
+        for row in range(self.known.listing.count()):
+            item = self.known.listing.item(row)
+            if item.data(ROLE_ID) == entry.sid and not item.isHidden():
+                item.setSelected(True)
 
     def _update_buttons(self) -> None:
         has_known = self.known.listing.count() > 0

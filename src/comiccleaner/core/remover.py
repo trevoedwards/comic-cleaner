@@ -21,11 +21,13 @@ from pathlib import Path
 from ..units import human_bytes
 from .archive import (
     ARCHIVE_SUFFIXES,
+    SEP_ALT,
     TEMP_PREFIX,
     ArchiveError,
     ComicArchive,
     detect_kind,
     is_page_name,
+    natural_key,
     write_cbz,
 )
 from .comicinfo import find_comicinfo, update_comicinfo
@@ -44,6 +46,10 @@ DEFAULT_MAX_FRACTION = 0.25
 # Written beside a book for the moment its original has been moved aside and the
 # cleaned copy is not yet in its place; see recover_interrupted.
 MARKER_SUFFIX = ".pending"
+
+# Characters no file name may hold on Windows, so a quarantined page never
+# carries one over from an entry name.
+_UNSAFE_CHARS = frozenset('<>:"/|?*' + SEP_ALT)
 
 
 class RemovalError(RuntimeError):
@@ -72,6 +78,8 @@ class RemovalPlan:
     # since, and a name alone would then delete the wrong image. A marked page
     # with no hash here is never removed, for the same reason.
     expected_sha: dict[str, str] = field(default_factory=dict)
+    # Each marked page's 0-based position in the book, as scanned.
+    indices: dict[str, int] = field(default_factory=dict)
 
     @property
     def remaining_pages(self) -> int:
@@ -84,6 +92,25 @@ class RemovalPlan:
             return 1.0
         return len(self.remove_names) / self.original_pages
 
+    @property
+    def ordered_names(self) -> list[str]:
+        """The marked pages in reading order."""
+        return sorted(self.remove_names, key=lambda n: (self.indices.get(n, 0), natural_key(n)))
+
+    @property
+    def takes_cover(self) -> bool:
+        """Removes the first page, which is usually the cover."""
+        return 0 in self.indices.values()
+
+    @property
+    def takes_last_page(self) -> bool:
+        return self.original_pages > 0 and self.original_pages - 1 in self.indices.values()
+
+    @property
+    def converts(self) -> bool:
+        """A .cbr or .cb7, which is written as a new .cbz rather than in place."""
+        return detect_kind(self.archive) in (ArchiveKind.RAR, ArchiveKind.SEVENZIP)
+
 
 @dataclass(slots=True)
 class RemovalResult:
@@ -95,6 +122,8 @@ class RemovalResult:
     converted: bool = False
     skipped: bool = False
     error: str | None = None
+    # Copies of the removed pages, when a quarantine folder was given.
+    quarantined: list[Path] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -151,9 +180,11 @@ def build_plans(
 ) -> list[RemovalPlan]:
     """Collapse group decisions into one plan per affected archive."""
     per_archive: dict[Path, dict[str, str]] = defaultdict(dict)
+    positions: dict[Path, dict[str, int]] = defaultdict(dict)
     for group in groups:
         for page in group.pages_to_remove():
             per_archive[page.archive][page.name] = page.content_sha
+            positions[page.archive][page.name] = page.index
 
     plans = [
         RemovalPlan(
@@ -161,11 +192,36 @@ def build_plans(
             remove_names=set(shas),
             original_pages=archive_page_counts.get(archive, 0),
             expected_sha=shas,
+            indices=positions[archive],
         )
         for archive, shas in per_archive.items()
     ]
     plans.sort(key=lambda p: str(p.archive).lower())
     return plans
+
+
+def split_protected(
+    plans: Iterable[RemovalPlan], folders: Iterable[Path | str]
+) -> tuple[list[RemovalPlan], list[RemovalPlan]]:
+    """Plans outside every protected folder, and those inside one.
+
+    A protected folder's books are imported and reviewed like any other, but
+    never rewritten. Paths are compared the way the platform compares them, so
+    on Windows a folder protects its books whatever the case of either path.
+    """
+    roots = [
+        os.path.normcase(os.path.abspath(str(f).strip()))
+        for f in folders
+        if str(f).strip()
+    ]
+    allowed: list[RemovalPlan] = []
+    protected: list[RemovalPlan] = []
+    for plan in plans:
+        where = os.path.normcase(os.path.abspath(plan.archive))
+        inside = any(where == root or where.startswith(root.rstrip(os.sep) + os.sep)
+                     for root in roots)
+        (protected if inside else allowed).append(plan)
+    return allowed, protected
 
 
 def split_by_fraction(
@@ -198,6 +254,33 @@ def is_backup_name(name: str, suffix: str = ".bak") -> bool:
     if not lowered.endswith(suffix):
         return False
     return Path(lowered[: -len(suffix)]).suffix in ARCHIVE_SUFFIXES
+
+
+def find_backups(folders: Iterable[Path], suffix: str = ".bak") -> list[Path]:
+    """Every backup this app could have made, directly inside any of `folders`.
+
+    Backups sit beside their book, or flat in the backup folder, so one level
+    is all there is to look at.
+    """
+    found: dict[Path, None] = {}
+    for folder in folders:
+        try:
+            children = list(Path(folder).iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if is_backup_name(child.name, suffix) and child.is_file():
+                found.setdefault(child, None)
+    return sorted(found)
+
+
+def total_size(paths: Iterable[Path]) -> int:
+    """Bytes used by the files that still exist."""
+    total = 0
+    for path in paths:
+        with contextlib.suppress(OSError):
+            total += path.stat().st_size
+    return total
 
 
 def _backup_path(archive: Path, policy: BackupPolicy) -> Path:
@@ -599,7 +682,42 @@ def _failed(result: RemovalResult, error: str) -> RemovalResult:
     result.error = error
     result.removed = 0
     result.bytes_freed = 0
+    # The book is untouched, so copies of "removed" pages would only mislead.
+    for copy in result.quarantined:
+        _discard(copy)
+    result.quarantined = []
     return result
+
+
+def _safe_part(name: str) -> str:
+    """One path component made from an entry or book name, never a way out."""
+    base = name.replace(SEP_ALT, "/").rsplit("/", 1)[-1]
+    cleaned = "".join("_" if ch in _UNSAFE_CHARS or ord(ch) < 32 else ch for ch in base)
+    cleaned = cleaned.strip(" .")
+    return cleaned or "page"
+
+
+def _quarantine(
+    arc: ComicArchive, names: Iterable[str], folder: Path, result: RemovalResult
+) -> None:
+    """Copy each page about to be removed into `folder`, under the book's name.
+
+    Every file written is noted in `result` as it is made, so a failure part
+    way through can take back what was already copied. Existing files are never
+    overwritten: a clash gets a numbered name instead.
+    """
+    target = folder / _safe_part(arc.path.stem)
+    target.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        base = Path(_safe_part(name))
+        dest = target / base.name
+        counter = 1
+        while dest.exists():
+            dest = target / f"{base.stem}-{counter}{base.suffix}"
+            counter += 1
+        with dest.open("xb") as out:
+            result.quarantined.append(dest)
+            arc.copy_to(name, out)
 
 
 def apply_plan(
@@ -609,11 +727,16 @@ def apply_plan(
     output_dir: Path | None = None,
     dry_run: bool = False,
     compress: bool = False,
+    quarantine: Path | None = None,
 ) -> RemovalResult:
     """Rebuild one archive without its marked pages.
 
     The new file is streamed to a temp path and verified before the original is
     moved aside, so an interrupted or failed run never destroys the source.
+
+    With `quarantine`, the removed pages are first copied there, under a folder
+    named after the book. If that fails the book fails too, before anything is
+    swapped, exactly as a failed rebuild would.
     """
     policy = backup or BackupPolicy()
     result = RemovalResult(archive=plan.archive)
@@ -675,6 +798,15 @@ def apply_plan(
             os.close(tmp_fd)
             tmp_path = Path(tmp_name)
             _rebuild(arc, tmp_path, checked, compress=compress)
+            if quarantine is not None:
+                try:
+                    _quarantine(arc, sorted(checked.removing, key=natural_key), quarantine,
+                                result)
+                except (OSError, ArchiveError) as exc:
+                    raise RemovalError(
+                        f"could not copy the removed pages to {quarantine}: "
+                        f"{_explain(exc, quarantine) if isinstance(exc, OSError) else exc}"
+                    ) from exc
     except (ArchiveError, RemovalError) as exc:
         if tmp_path is not None:
             _discard(tmp_path)
@@ -741,10 +873,14 @@ def apply_removals(
     output_dir: Path | None = None,
     dry_run: bool = False,
     compress: bool = False,
+    quarantine: Path | None = None,
     progress: ProgressFn | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> RemovalReport:
-    """Apply every plan in turn. Disk-bound, so there is no thread pool here."""
+    """Apply every plan in turn. Disk-bound, so there is no thread pool here.
+
+    `quarantine` keeps a copy of every removed page; see apply_plan.
+    """
     todo = list(plans)
     report = RemovalReport()
     # Checked before the first book, dry run or not, so a run that cannot finish
@@ -772,6 +908,7 @@ def apply_removals(
                 output_dir=plan_output,
                 dry_run=dry_run,
                 compress=compress,
+                quarantine=quarantine,
             )
         except Exception as exc:
             log.exception("removal failed for %s", plan.archive)

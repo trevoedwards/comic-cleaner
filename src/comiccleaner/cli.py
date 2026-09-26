@@ -9,6 +9,7 @@ thing no matter what someone last chose in the Settings dialog.
     comiccleaner clean PATH... (--all | --known | --group ID...) [--dry-run] [--yes] ...
     comiccleaner known (list | export FILE | import FILE | forget ID...)
     comiccleaner history (list | restore RUN)
+    comiccleaner pack (export FILE | import FILE)
 
 Exit codes: 0 success, 1 some archives could not be read or cleaned, 2 bad
 usage or a refusal (nothing was changed), 130 interrupted.
@@ -28,7 +29,10 @@ from typing import Any, TextIO
 
 from . import __version__
 from .core.cache import HashCache
+from .core.duplicates import DuplicateBooks, find_duplicate_books
 from .core.grouping import (
+    EDGE_PAGES,
+    MAX_EDGE_PAGES,
     MAX_THRESHOLD,
     GroupingOptions,
     build_groups,
@@ -37,6 +41,13 @@ from .core.grouping import (
 )
 from .core.history import load_history, record_run, restore, when
 from .core.model import ArchiveInfo, Decision, DuplicateGroup, MatchKind
+from .core.pack import export_pack, import_pack, read_pack
+from .core.planfile import (
+    SKIPPED_OVER_LIMIT,
+    describe_plan,
+    plan_records,
+    write_plan_json,
+)
 from .core.remover import (
     DEFAULT_MAX_FRACTION,
     BackupPolicy,
@@ -47,7 +58,7 @@ from .core.remover import (
     recover_interrupted,
     split_by_fraction,
 )
-from .core.scanner import find_archives, scan_archives
+from .core.scanner import scan_archives, survey
 from .core.signatures import (
     SignatureFileError,
     capture_samples,
@@ -60,7 +71,7 @@ from .units import human_bytes
 
 log = logging.getLogger(__name__)
 
-COMMANDS = ("scan", "clean", "known", "history")
+COMMANDS = ("scan", "clean", "known", "history", "pack")
 
 EXIT_OK = 0
 EXIT_FAILURES = 1
@@ -150,6 +161,12 @@ def _matching_options(parser: argparse.ArgumentParser) -> None:
         help="Leave out the known-junk list (pages removed before, which are otherwise "
         "found even in a single book).",
     )
+    group.add_argument(
+        "--edge-window", type=int, default=EDGE_PAGES, metavar="N",
+        help=f"Pages from either end of a book that count as 'near the edge' when "
+        f"ranking groups and warning about mid-book matches (default {EDGE_PAGES}, "
+        f"at most {MAX_EDGE_PAGES}). Does not limit what clean removes; see --edges.",
+    )
 
 
 def _common_options(parser: argparse.ArgumentParser) -> None:
@@ -167,6 +184,11 @@ def _common_options(parser: argparse.ArgumentParser) -> None:
                         help="Hash every page afresh and store nothing.")
     parser.add_argument("--workers", type=int, metavar="N",
                         help="Parallel scan threads (default: one per core, up to 8).")
+    parser.add_argument(
+        "--exclude", action="append", default=[], metavar="GLOB",
+        help="Leave out files whose name, or path relative to a PATH folder, matches "
+        "this glob, such as '*sample*' or 'Scans/*'. Repeatable.",
+    )
     _matching_options(parser)
 
 
@@ -224,6 +246,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip any book that would lose more than this share of its pages "
         f"(default {DEFAULT_MAX_FRACTION}; 1 disables the check).",
     )
+    safety.add_argument(
+        "--plan", type=Path, metavar="FILE",
+        help="Write the plan (every book to clean or skip, its pages and share) to this "
+        "JSON file before anything else happens. With --dry-run, nothing else is written.",
+    )
+    safety.add_argument(
+        "--quarantine", type=Path, metavar="DIR",
+        help="Copy every removed page into DIR, under the book's name, before the book "
+        "is replaced. A book whose pages cannot be copied is left untouched.",
+    )
     output = clean.add_argument_group("output")
     output.add_argument("--output", type=Path, metavar="DIR",
                         help="Write cleaned copies here and leave the originals untouched.")
@@ -276,11 +308,26 @@ def build_parser() -> argparse.ArgumentParser:
     undo.add_argument("run", type=int, metavar="RUN", help="A run number from 'history list'.")
     undo.add_argument("-y", "--yes", action="store_true",
                       help="Do not ask for confirmation. Required when not run from a terminal.")
+
+    pack = commands.add_parser(
+        "pack", help="Export or import a review pack (known junk and ignored pages).",
+        description="A review pack holds the known-junk list and the ignore list in one "
+        "file, to move to another machine or share. Packs written by the GUI also carry "
+        "its matching settings; those are only applied from the GUI.",
+    )
+    pack.add_argument("--cache", type=Path, metavar="FILE",
+                      help="Hash cache to use (default: the one the GUI uses).")
+    pack.add_argument("-v", "--verbose", action="store_true", help="Debug logging.")
+    pack_steps = pack.add_subparsers(dest="action", required=True, metavar="ACTION")
+    pack_out = pack_steps.add_parser("export", help="Write a review pack.")
+    pack_out.add_argument("file", type=Path, metavar="FILE")
+    pack_in = pack_steps.add_parser("import", help="Merge in a review pack.")
+    pack_in.add_argument("file", type=Path, metavar="FILE")
     return parser
 
 
 def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    if args.command in ("known", "history"):
+    if args.command in ("known", "history", "pack"):
         return
     if not 0 <= args.threshold <= MAX_THRESHOLD:
         parser.error(f"--threshold must be between 0 and {MAX_THRESHOLD}")
@@ -290,6 +337,8 @@ def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
         parser.error("--min-books must be at least 1")
     if args.workers is not None and args.workers < 1:
         parser.error("--workers must be at least 1")
+    if not 1 <= args.edge_window <= MAX_EDGE_PAGES:
+        parser.error(f"--edge-window must be between 1 and {MAX_EDGE_PAGES}")
     if args.command == "clean":
         if not 0 < args.max_fraction <= 1:
             parser.error("--max-fraction must be above 0 and at most 1")
@@ -309,6 +358,7 @@ def grouping_options(args: argparse.Namespace) -> GroupingOptions:
         include_flat=args.include_blank,
         skip_first_page=not args.include_first_page,
         skip_last_page=args.skip_last_page,
+        edge_pages=args.edge_window,
     )
 
 
@@ -319,6 +369,7 @@ class _Progress:
     """A single overwritten status line on a terminal; nothing otherwise."""
 
     def __init__(self, stream: TextIO, enabled: bool) -> None:
+        self.stream = stream
         self._stream = stream
         self._enabled = enabled and stream.isatty()
         self._width = 0
@@ -359,7 +410,10 @@ def _scan(
     missing = [p for p in args.paths if not p.exists()]
     if missing:
         raise _Refusal("No such file or folder: " + ", ".join(str(p) for p in missing))
-    paths = find_archives(args.paths)
+    found = survey(args.paths, exclude=args.exclude)
+    if found.pdfs and not args.quiet:
+        print(f"Skipping {found.pdfs} PDF file(s): PDF is not supported.", file=progress.stream)
+    paths = found.found
     if not paths:
         raise _Refusal("No comic archives found in " + ", ".join(str(p) for p in args.paths))
     try:
@@ -502,6 +556,31 @@ def _print_library(archives: list[ArchiveInfo], out: TextIO) -> None:
         print(f"  {_display(archive.path, root)}: {archive.error}", file=out)
 
 
+def _duplicates_json(pairs: list[DuplicateBooks]) -> list[dict[str, Any]]:
+    return [
+        {"smaller": str(p.smaller), "larger": str(p.larger), "shared_pages": p.shared,
+         "smaller_pages": p.smaller_pages, "overlap": round(p.overlap, 3)}
+        for p in pairs
+    ]
+
+
+def _print_duplicate_books(pairs: list[DuplicateBooks], out: TextIO, root: Path | None) -> None:
+    if not pairs:
+        return
+    print(file=out)
+    print(
+        f"{len(pairs)} pair(s) of books look like the same issue twice. Their shared "
+        "pages are not filler; nothing is removed because of this:",
+        file=out,
+    )
+    for pair in pairs:
+        print(
+            f"  {_display(pair.smaller, root)}  ~  {_display(pair.larger, root)}  "
+            f"({pair.shared} of {pair.smaller_pages} pages shared, {pair.overlap:.0%})",
+            file=out,
+        )
+
+
 def _print_groups(
     groups: list[DuplicateGroup], out: TextIO, root: Path | None, *, every_page: bool
 ) -> None:
@@ -558,6 +637,7 @@ def _result_json(report: RemovalReport, skipped: list[RemovalPlan]) -> dict[str,
                 "removed": r.removed,
                 "bytes_freed": r.bytes_freed,
                 "converted": r.converted,
+                "quarantined": [str(q) for q in r.quarantined],
                 "error": r.error,
             }
             for r in report.results
@@ -599,9 +679,27 @@ def _print_plans(plans: list[RemovalPlan], skipped: list[RemovalPlan],
         pages = sum(len(p.remove_names) for p in plans)
         print(f"{pages} page(s) to remove from {len(plans)} archive(s):", file=out)
     for plan in plans:
+        print(f"  {_display(plan.archive, root)}: {describe_plan(plan)}", file=out)
+    edges = [p for p in plans if p.takes_cover or p.takes_last_page]
+    if edges:
+        print(file=out)
         print(
-            f"  {_display(plan.archive, root)}: removing {len(plan.remove_names)}, "
-            f"{plan.remaining_pages} left",
+            f"{len(edges)} book(s) would lose their first or last page, which is often "
+            "the cover or the back cover:",
+            file=out,
+        )
+        for plan in edges:
+            which = " and ".join(
+                w for w, hit in (("first", plan.takes_cover), ("last", plan.takes_last_page))
+                if hit
+            )
+            print(f"  {_display(plan.archive, root)}: its {which} page", file=out)
+    converting = [p for p in plans if p.converts]
+    if converting:
+        print(file=out)
+        print(
+            f"{len(converting)} .cbr/.cb7 book(s) cannot be written in that format; each is "
+            "written as a new .cbz beside the original, which is kept as the backup.",
             file=out,
         )
     if skipped:
@@ -654,15 +752,19 @@ def _print_report(
 def _run_scan(args: argparse.Namespace, archives: list[ArchiveInfo],
               cache: HashCache | None, out: TextIO) -> int:
     groups = _groups(args, archives, cache)
+    pairs = find_duplicate_books(archives)
     if args.json:
         payload = {"version": JSON_VERSION, "library": _library_json(archives),
-                   "groups": [_group_json(g) for g in groups]}
+                   "groups": [_group_json(g) for g in groups],
+                   "duplicate_books": _duplicates_json(pairs)}
         json.dump(payload, out, indent=2)
         out.write("\n")
     else:
         _print_library(archives, out)
         print(file=out)
-        _print_groups(groups, out, _display_root(archives), every_page=args.pages)
+        root = _display_root(archives)
+        _print_groups(groups, out, root, every_page=args.pages)
+        _print_duplicate_books(pairs, out, root)
     return EXIT_FAILURES if any(a.error for a in archives) else EXIT_OK
 
 
@@ -698,6 +800,16 @@ def _run_clean(
 
     human = err if args.json else out  # keep stdout pure JSON
     root = _display_root(archives)
+    if args.plan is not None:
+        records = plan_records(
+            plans, [(p, SKIPPED_OVER_LIMIT) for p in skipped], dry_run=args.dry_run
+        )
+        try:
+            write_plan_json(args.plan, records, dry_run=args.dry_run)
+        except OSError as exc:
+            raise _Refusal(f"Could not write the plan to {args.plan}: {exc}") from exc
+        if not (args.json and args.quiet):
+            print(f"Wrote the plan for {len(records)} book(s) to {args.plan}.", file=human)
     if not (args.json and args.quiet):
         _print_library(archives, human)
         print(file=human)
@@ -741,6 +853,7 @@ def _run_clean(
             output_dir=args.output,
             dry_run=args.dry_run,
             compress=args.compress,
+            quarantine=args.quarantine,
             progress=lambda d, t, n: progress(d, t, n, "Rewriting"),
             should_cancel=lambda: interrupt.requested,
         )
@@ -889,6 +1002,36 @@ def _run_history(
     return EXIT_FAILURES if failed else EXIT_OK
 
 
+def _run_pack(args: argparse.Namespace, cache: HashCache, out: TextIO) -> int:
+    """Write or merge a review pack. Settings stay with the GUI."""
+    if args.action == "export":
+        pack = export_pack(cache, args.file, None)
+        print(
+            f"Wrote {len(pack.known)} remembered page(s) and {len(pack.ignored)} ignored "
+            f"page(s) to {args.file}. Matching settings are only included when the GUI "
+            "exports a pack.",
+            file=out,
+        )
+        return EXIT_OK
+    try:
+        pack = read_pack(args.file)
+    except SignatureFileError as exc:
+        raise _Refusal(f"{exc}. Nothing was imported.") from exc
+    result = import_pack(cache, pack)
+    print(
+        f"Known junk: added {result.known.added}, {result.known.merged} already known. "
+        f"Ignored: added {result.ignored_added}, {result.ignored_merged} already there.",
+        file=out,
+    )
+    if pack.settings:
+        print(
+            "The pack also has matching settings. They apply to the GUI only: import the "
+            "pack there (File > Import Review Pack) to use them.",
+            file=out,
+        )
+    return EXIT_OK
+
+
 def main(
     argv: Sequence[str],
     *,
@@ -918,7 +1061,7 @@ def main(
             print(f"warning: hash cache unavailable ({exc}); hashing everything",
                   file=err)
 
-    if args.command in ("known", "history"):
+    if args.command in ("known", "history", "pack"):
         if cache is None:
             print(f"comiccleaner: {args.command} lives in the hash cache, which is "
                   "unavailable", file=err)
@@ -926,6 +1069,8 @@ def main(
         try:
             if args.command == "history":
                 return _run_history(args, cache, out, err, inp)
+            if args.command == "pack":
+                return _run_pack(args, cache, out)
             return _run_known(args, cache, out)
         except _Refusal as refusal:
             print(f"comiccleaner: {refusal}", file=err)

@@ -98,7 +98,8 @@ def _page_count(path: Path) -> int:
 
 
 def _decision_shortcuts(window: MainWindow) -> list[QShortcut]:
-    return [s for s in window.findChildren(QShortcut) if s.key().toString() in ("D", "K", "I")]
+    keys = ("D", "K", "I", main_window.DEFER_KEY, main_window.NEXT_WARNING_KEY)
+    return [s for s in window.findChildren(QShortcut) if s.key().toString() in keys]
 
 
 def test_decision_keys_are_single_letters_scoped_to_the_review(window):
@@ -239,7 +240,7 @@ def test_preview_loads_both_images_and_edits_the_group(window, library):
     )
     try:
         assert pump_until(
-            lambda: len(dialog._images) == 2 and all(dialog._images.values()), 15
+            lambda: len(dialog._images) >= 2 and all(dialog._images.values()), 15
         ), "preview images never arrived"
         assert dialog.reference_pane.isVisibleTo(dialog)
 
@@ -1101,7 +1102,10 @@ def test_missing_books_stay_listed_until_dismissed(make_window, tmp_path):
     second.status_label.setText("later messages")
     assert second.missing_banner.isVisibleTo(second)
 
-    [dismiss] = second.missing_banner.findChildren(main_window.QPushButton)
+    [dismiss] = [
+        b for b in second.missing_banner.findChildren(main_window.QPushButton)
+        if b.text() == "Dismiss"
+    ]
     dismiss.click()
     assert not second.missing_banner.isVisibleTo(second)
 

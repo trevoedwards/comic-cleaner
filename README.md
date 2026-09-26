@@ -53,6 +53,9 @@ python -m comiccleaner "/path/to/comics"        # paths are optional
    A folder brings in its `.cbz`, `.zip`, `.cbr` and `.cb7` files. Plain `.rar`
    and `.7z` files are skipped there, since they are usually not comics; add one
    directly (or name it on the command line) and it is imported like any other.
+   A large folder is walked in the background and can be stopped part way; the
+   status line says what was skipped (PDFs, plain `.rar`/`.7z`, and anything
+   matching your exclude patterns).
 2. **Scan** — pages are decoded and hashed, then cached against each file's size
    and mtime, so re-scanning an unchanged library is instant. The cache follows a
    library that has been moved, too.
@@ -78,10 +81,20 @@ which is instant for any book the hash cache already knows.
 | <kbd>D</kbd> | Remove the ticked copies of this group, then go to the next undecided group |
 | <kbd>K</kbd> | Keep this group, then go to the next undecided group |
 | <kbd>I</kbd> | Ignore this page from now on (undo it from **Remembered Pages…**) |
+| <kbd>S</kbd> | Defer: decide later, and go to the next undecided group |
+| <kbd>W</kbd> | Go to the next group with a warning |
 | <kbd>Space</kbd> | Tick or untick the selected copy |
 | <kbd>Enter</kbd> | Open the selected copy full size |
+| <kbd>Ctrl</kbd>+<kbd>Z</kbd> | Undo the last review decision (up to 50; not across a real removal) |
 | <kbd>Delete</kbd> | In the library, remove the selected books from the list (not from disk) |
 | <kbd>Ctrl</kbd>+<kbd>O</kbd> / <kbd>Ctrl</kbd>+<kbd>R</kbd> | Add files / scan |
+
+The letter keys only work while the group list, the copies or the decision
+buttons have focus, never while you are typing in a box. Shift- or Ctrl-click
+several groups and <kbd>D</kbd>, <kbd>K</kbd>, <kbd>I</kbd>, <kbd>S</kbd>,
+**Mark all**, **Clear all** and **Mark safe** act on all of them. Right-click a
+book, group or copy for more (reveal in folder, copy a path or group id, open
+the archive in your reader).
 
 In the full-size preview, <kbd>←</kbd> <kbd>→</kbd> step through the copies,
 <kbd>Space</kbd> ticks or unticks the one on screen, and for **similar** groups
@@ -89,6 +102,46 @@ In the full-size preview, <kbd>←</kbd> <kbd>→</kbd> step through the copies,
 how you spot an advert whose issue number or date changes from book to book.
 Similar groups list the copies furthest from the reference first, so any page
 that single-linkage chained in shows up at the start, not buried.
+**Compare with this** (<kbd>P</kbd>) makes the copy on screen the reference,
+in any group. The wheel zooms, dragging pans, **1:1** (<kbd>1</kbd>) shows real
+pixels and **Fit** (<kbd>F</kbd>) goes back to the whole page.
+
+### More ways to review and apply
+
+- **Apply to Selected Books…** applies the marked pages to the books selected in
+  the library only. **Review → Remove Known Junk Only…** is the GUI's
+  `clean --known`: it marks the known-junk groups and applies just those.
+- **Only Near the Edges** leaves unticked every copy further into its book than
+  the edge window (Settings, default 3 pages), like `clean --edges`.
+- The confirmation lists each book's share of pages removed and the first page
+  names, flags any first or last page, and **Save Plan…** writes the plan to JSON
+  and CSV without changing anything.
+- Books that look like the **same issue twice** get a banner; nothing is marked
+  because of it.
+- **File → Export / Import Review Pack…** moves your matching settings, known
+  junk and ignore list to another machine. Settings are applied only after you
+  confirm the changes they make.
+- The first time a run would delete pages matched only by an **imported**
+  known-junk list, you are asked once more.
+- **History…** can pin a run (its backups survive **Clean Up Backups…**) or
+  delete one run's backups, and shows the first page before a restore.
+
+PDF is not supported, and neither `.cbr` nor `.cb7` can be written: cleaning one
+writes a `.cbz` beside it and keeps the original as the backup. See
+[Reviewing groups](docs/review.md) and [Settings](docs/settings.md) for the rest.
+
+### After a library import (Komga, Kavita, ComicRack)
+
+There is no server integration. Instead, run the command line from whatever
+post-import hook your server or downloader offers:
+
+```bash
+comiccleaner clean /library --known --yes
+```
+
+This only removes pages you have already removed once (or imported as known
+junk), so it never acts on a match nobody has looked at. It will not find new
+adverts; review those in the app.
 
 ## Documentation
 
@@ -97,7 +150,7 @@ that single-linkage chained in shows up at the start, not buried.
 - [How matching works](docs/matching.md)
 - [Settings](docs/settings.md)
 - [Safety](docs/safety.md)
-- [Building a binary](docs/building.md)
+- [Building a binary](docs/building.md) — including the optional signing and PyPI workflows
 - [Development](docs/development.md)
 
 ## Credits

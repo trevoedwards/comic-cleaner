@@ -1,4 +1,4 @@
-"""Full-size page preview, with a side-by-side compare for similar groups."""
+"""Full-size page preview, with a side-by-side compare against any copy."""
 
 from __future__ import annotations
 
@@ -7,8 +7,18 @@ from typing import cast
 
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import QEvent, QObject, Qt
-from PySide6.QtGui import QImage, QKeyEvent, QKeySequence, QPixmap, QResizeEvent, QShortcut
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt
+from PySide6.QtGui import (
+    QImage,
+    QKeyEvent,
+    QKeySequence,
+    QMouseEvent,
+    QPainter,
+    QPaintEvent,
+    QPixmap,
+    QShortcut,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -65,8 +75,143 @@ def difference_image(reference: Image.Image, copy: Image.Image) -> tuple[Image.I
     return Image.fromarray(out.astype(np.uint8), "RGB"), changed
 
 
+# How far the wheel can zoom, as screen pixels per image pixel.
+_MIN_ZOOM = 0.05
+_MAX_ZOOM = 16.0
+# Each wheel notch zooms by this factor.
+_ZOOM_STEP = 1.25
+
+
+class _ZoomView(QWidget):
+    """An image that fits its pane until zoomed; the wheel zooms, dragging pans.
+
+    Starts, and returns with fit(), fitted to the pane. actual_size() shows one
+    image pixel per screen pixel, allowing for display scaling.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setMinimumSize(200, 200)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self._pixmap: QPixmap | None = None
+        self._text = "Loading..."
+        self._fitted = True
+        self._scale = 1.0  # widget pixels per image pixel, when not fitted
+        self._origin = QPointF(0, 0)  # the image's top-left, when not fitted
+        self._drag: QPointF | None = None
+
+    @property
+    def fitted(self) -> bool:
+        return self._fitted
+
+    def pixmap(self) -> QPixmap | None:
+        return self._pixmap
+
+    def text(self) -> str:
+        return "" if self._pixmap is not None else self._text
+
+    def set_pixmap(self, pixmap: QPixmap | None, text: str = "") -> None:
+        resized = (
+            pixmap is not None and self._pixmap is not None
+            and pixmap.size() != self._pixmap.size()
+        )
+        self._pixmap = pixmap
+        self._text = text
+        if resized and not self._fitted:
+            self._centre()  # another copy, at another size: keep the zoom, recentre
+        self.update()
+
+    def fit(self) -> None:
+        self._fitted = True
+        self.update()
+
+    def actual_size(self) -> None:
+        self._fitted = False
+        self._scale = 1.0 / max(self.devicePixelRatioF(), 0.01)
+        self._centre()
+        self.update()
+
+    def scale(self) -> float:
+        return self._fit_scale() if self._fitted else self._scale
+
+    def _fit_scale(self) -> float:
+        if self._pixmap is None or self._pixmap.isNull():
+            return 1.0
+        size = self._pixmap.deviceIndependentSize()
+        return min(self.width() / max(size.width(), 1), self.height() / max(size.height(), 1))
+
+    def _centre(self) -> None:
+        if self._pixmap is None:
+            return
+        size = self._pixmap.deviceIndependentSize() * self._scale
+        self._origin = QPointF(
+            (self.width() - size.width()) / 2, (self.height() - size.height()) / 2
+        )
+
+    def image_rect(self) -> QRectF:
+        if self._pixmap is None:
+            return QRectF()
+        size = self._pixmap.deviceIndependentSize() * self.scale()
+        if self._fitted:
+            return QRectF(
+                (self.width() - size.width()) / 2, (self.height() - size.height()) / 2,
+                size.width(), size.height(),
+            )
+        return QRectF(self._origin, size)
+
+    def zoom_by(self, factor: float, around: QPointF | None = None) -> None:
+        """Zoom, keeping the image point under `around` (default: the middle) still."""
+        if self._pixmap is None:
+            return
+        point = around if around is not None else QPointF(self.width() / 2, self.height() / 2)
+        rect = self.image_rect()
+        old = self.scale()
+        new = max(_MIN_ZOOM, min(_MAX_ZOOM, old * factor))
+        on_image = (point - rect.topLeft()) / old
+        self._fitted = False
+        self._scale = new
+        self._origin = point - on_image * new
+        self.update()
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        notches = event.angleDelta().y() / 120
+        if notches:
+            self.zoom_by(_ZOOM_STEP ** notches, event.position())
+        event.accept()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() is Qt.MouseButton.LeftButton and self._pixmap is not None:
+            if self._fitted:  # start panning from where the image is now
+                self._origin = self.image_rect().topLeft()
+                self._scale = self.scale()
+                self._fitted = False
+            self._drag = event.position()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._drag is not None:
+            self._origin += event.position() - self._drag
+            self._drag = event.position()
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self._drag = None
+        self.unsetCursor()
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        if self._pixmap is None:
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._text)
+            return
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawPixmap(self.image_rect(), self._pixmap, QRectF(self._pixmap.rect()))
+
+
 class _ImagePane(QWidget):
-    """A caption over an image that scales to fit whatever room it is given."""
+    """A caption over an image that fits whatever room it is given until zoomed."""
 
     def __init__(self, caption: str) -> None:
         super().__init__()
@@ -74,35 +219,12 @@ class _ImagePane(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self.caption = QLabel(caption)
         self.caption.setWordWrap(True)
-        self.view = QLabel("Loading...")
-        self.view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.view.setMinimumSize(200, 200)
-        self.view.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.view = _ZoomView()
         layout.addWidget(self.caption)
         layout.addWidget(self.view, 1)
-        self._pixmap: QPixmap | None = None
 
     def set_pixmap(self, pixmap: QPixmap | None, fallback: str = "") -> None:
-        self._pixmap = pixmap
-        if pixmap is None:
-            self.view.setPixmap(QPixmap())
-            self.view.setText(fallback)
-        self._rescale()
-
-    def resizeEvent(self, event: QResizeEvent) -> None:
-        super().resizeEvent(event)
-        self._rescale()
-
-    def _rescale(self) -> None:
-        if self._pixmap is None:
-            return
-        self.view.setPixmap(
-            self._pixmap.scaled(
-                self.view.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        )
+        self.view.set_pixmap(pixmap, fallback)
 
 
 class _LeaveKeysToDialog(QObject):
@@ -155,8 +277,12 @@ class PagePreviewDialog(QDialog):
         self._errors: dict[str, str] = {}
         self._pixmaps: dict[str, QPixmap] = {}
         self._caption = ""
+        # Similar groups compare against the reference image from the start; any
+        # group can compare against a copy pinned with "Compare with this".
         self._compare = group.kind is MatchKind.SIMILAR
         self._reference = group.representative
+        # Once closed, answers still on their way are for nobody.
+        self._closed = False
         # The difference image is worked out on the thumbnail thread, not here: at
         # full size it takes long enough to stall the window. The one asked for
         # last, and the last one that came back (key, image or None, share changed).
@@ -191,6 +317,19 @@ class PagePreviewDialog(QDialog):
         self.chk_diff.setToolTip("Paint what differs from the reference in red (H)")
         self.chk_diff.toggled.connect(self._show_current)
         self.chk_diff.setVisible(self._compare)
+        self.btn_pin = QPushButton("Compare with this")
+        self.btn_pin.setToolTip(
+            "Make the copy on screen the reference the others are compared with (P)"
+        )
+        self.btn_pin.clicked.connect(self.pin_current)
+        self.btn_fit = QPushButton("Fit")
+        self.btn_fit.setToolTip("Fit the whole page in the window (F)")
+        self.btn_fit.clicked.connect(self.fit)
+        self.btn_actual = QPushButton("1:1")
+        self.btn_actual.setToolTip(
+            "One image pixel per screen pixel (1). The wheel zooms; drag to pan."
+        )
+        self.btn_actual.clicked.connect(self.actual_size)
         close = QPushButton("Close")
         close.clicked.connect(self.accept)
 
@@ -200,7 +339,10 @@ class PagePreviewDialog(QDialog):
         controls.addSpacing(16)
         controls.addWidget(self.chk_remove)
         controls.addWidget(self.chk_diff)
+        controls.addWidget(self.btn_pin)
         controls.addStretch(1)
+        controls.addWidget(self.btn_fit)
+        controls.addWidget(self.btn_actual)
         controls.addWidget(close)
         layout.addLayout(controls)
 
@@ -210,7 +352,10 @@ class PagePreviewDialog(QDialog):
             (Qt.Key.Key_Left, lambda: self.step(-1)),
             (Qt.Key.Key_Right, lambda: self.step(1)),
             (Qt.Key.Key_Space, self.chk_remove.toggle),
-            (Qt.Key.Key_H, self.chk_diff.toggle),
+            (Qt.Key.Key_H, self._toggle_diff),
+            (Qt.Key.Key_P, self.pin_current),
+            (Qt.Key.Key_F, self.fit),
+            (Qt.Key.Key_1, self.actual_size),
         ):
             QShortcut(QKeySequence(keys), self, handler)
         self._key_guard = _LeaveKeysToDialog((Qt.Key.Key_Space, Qt.Key.Key_H), self)
@@ -225,8 +370,48 @@ class PagePreviewDialog(QDialog):
         self._show_current()
 
     def _disconnect(self) -> None:
+        self._closed = True
         self._thumbs.page_loaded.disconnect(self._on_page_loaded)
         self._thumbs.task_done.disconnect(self._on_diff_done)
+
+    # -- zoom and compare --------------------------------------------------
+    def _views(self) -> list[_ZoomView]:
+        panes = [self.copy_pane]
+        if self._compare:
+            panes.insert(0, self.reference_pane)
+        return [pane.view for pane in panes]
+
+    def fit(self) -> None:
+        for view in self._views():
+            view.fit()
+
+    def actual_size(self) -> None:
+        for view in self._views():
+            view.actual_size()
+
+    def _toggle_diff(self) -> None:
+        if self._compare:
+            self.chk_diff.toggle()
+
+    def pin_current(self) -> None:
+        """Compare every other copy with the one on screen."""
+        page = self.current_page()
+        self._reference = page
+        self._diff = None
+        self._diff_wanted = None
+        if not self._compare:
+            self._compare = True
+            self.reference_pane.show()
+            self.chk_diff.setVisible(True)
+        self.reference_pane.caption.setText(
+            f"<b>Reference</b> — {self._describe(page)}"
+        )
+        self._request(page)
+        self._show_current()
+
+    @property
+    def reference(self) -> PageEntry:
+        return self._reference
 
     # -- navigation --------------------------------------------------------
     def current_page(self) -> PageEntry:
@@ -247,13 +432,18 @@ class PagePreviewDialog(QDialog):
         if self._compare and page is self._reference:
             caption += " (this is the reference)"
         elif self._compare:
-            caption += f", {page_distance(page, self._group)} bit(s) from the reference"
+            bits = hamming(page.dhash, self._reference.dhash)
+            caption += f", {bits} bit(s) from the reference"
         self._caption = caption
         self.position.setText(f"{self._index + 1} / {len(self._pages)}")
         self.chk_remove.blockSignals(True)
         self.chk_remove.setChecked(page.key not in self._group.kept)
         self.chk_remove.blockSignals(False)
         self._request(page)
+        # The copies either side are next, so they load while this one is looked at.
+        if len(self._pages) > 1:
+            for delta in (1, -1):
+                self._request(self._pages[(self._index + delta) % len(self._pages)])
         self._render()
 
     # -- images ------------------------------------------------------------
@@ -264,8 +454,8 @@ class PagePreviewDialog(QDialog):
             self._thumbs.request_page(page)
 
     def _on_page_loaded(self, key: str, image: object, error: str) -> None:
-        if key not in self._images:
-            return  # someone else's request
+        if self._closed or key not in self._images:
+            return  # someone else's request, or a late answer after closing
         self._images[key] = image if isinstance(image, Image.Image) else None
         if error:
             self._errors[key] = error
@@ -329,7 +519,7 @@ class PagePreviewDialog(QDialog):
             self._thumbs.run_task(key, partial(difference_image, reference, current))
 
     def _on_diff_done(self, key: str, result: object, error: str) -> None:
-        if key != self._diff_wanted:
+        if self._closed or key != self._diff_wanted:
             return  # someone else's task, or a page the user has since left
         self._diff_wanted = None
         page = self.current_page()

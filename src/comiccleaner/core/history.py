@@ -70,6 +70,13 @@ class Run:
     started_at: float
     source: str  # "gui" or "cli"
     items: list[RunItem] = field(default_factory=list)
+    # Its backups are kept through Clean Up Backups until it is unpinned.
+    pinned: bool = False
+
+    @property
+    def backups(self) -> list[Path]:
+        """The backups this run made that are still on disk."""
+        return [i.backup for i in self.items if i.backup is not None and i.backup.exists()]
 
     @property
     def removed(self) -> int:
@@ -113,8 +120,8 @@ def record_run(
 
 def load_history(cache: HashCache) -> list[Run]:
     runs = {
-        rid: Run(id=rid, started_at=float(at), source=src)
-        for rid, at, src in cache.run_rows()
+        rid: Run(id=rid, started_at=float(at), source=src, pinned=bool(pinned))
+        for rid, at, src, pinned in cache.run_rows()
     }
     for row in cache.run_item_rows():
         (item_id, run_id, archive, output, backup, removed, pages, freed,
@@ -158,6 +165,43 @@ def restore(cache: HashCache, item: RunItem) -> str | None:
     if item.output != item.archive:
         cache.invalidate(item.output)
     return None
+
+
+def pinned_backups(runs: Iterable[Run]) -> set[Path]:
+    """Backups that belong to a pinned run, which a cleanup must leave alone."""
+    return {
+        item.backup.resolve()
+        for run in runs if run.pinned
+        for item in run.items if item.backup is not None
+    }
+
+
+@dataclass(slots=True)
+class DeletedBackups:
+    deleted: int = 0
+    freed: int = 0
+    errors: list[str] = field(default_factory=list)
+
+
+def delete_run_backups(run: Run) -> DeletedBackups:
+    """Delete the backups one run made, and nothing else. Refuses a pinned run.
+
+    Its books can no longer be restored afterwards; History says so.
+    """
+    if run.pinned:
+        raise ValueError(f"run {run.id} is pinned; unpin it to delete its backups")
+    outcome = DeletedBackups()
+    for backup in run.backups:
+        try:
+            size = backup.stat().st_size
+            backup.unlink()
+        except OSError as exc:
+            log.warning("could not delete backup %s: %s", backup, exc)
+            outcome.errors.append(f"{backup.name}: {_explain(exc, backup)}")
+            continue
+        outcome.deleted += 1
+        outcome.freed += size
+    return outcome
 
 
 CSV_COLUMNS = [

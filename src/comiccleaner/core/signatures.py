@@ -19,8 +19,9 @@ from pathlib import Path
 from .. import APP_NAME, __version__
 from .archive import ArchiveError, ComicArchive, detect_kind
 from .cache import HashCache, KnownEntry
+from .grouping import matches_any
 from .hashing import DecodeError, make_thumbnail
-from .model import ArchiveKind, DuplicateGroup, PageEntry
+from .model import ArchiveKind, Decision, DuplicateGroup, PageEntry
 from .remover import RemovalReport
 
 log = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ _MAX_ENTRIES = 20_000
 _MAX_HASHES_PER_ENTRY = 1_000
 _MAX_THUMBNAIL_BYTES = 512 * 1024
 _MAX_NOTE = 200
+_MAX_TAGS = 200
 
 
 class SignatureFileError(ValueError):
@@ -112,17 +114,7 @@ class ImportResult:
 
 def export_known(entries: Iterable[KnownEntry], path: Path) -> int:
     """Write a list others can import. Returns the number of entries written."""
-    rows = [
-        {
-            "id": entry.sid,
-            "note": entry.note,
-            "hashes": sorted(f"{h:016x}" for h in entry.hashes),
-            "thumbnail": (
-                base64.b64encode(entry.thumbnail).decode("ascii") if entry.thumbnail else None
-            ),
-        }
-        for entry in entries
-    ]
+    rows = known_rows(entries)
     payload = {
         "format": FILE_FORMAT,
         "version": FILE_VERSION,
@@ -133,7 +125,23 @@ def export_known(entries: Iterable[KnownEntry], path: Path) -> int:
     return len(rows)
 
 
-def _parse_hash(raw: object) -> int:
+def known_rows(entries: Iterable[KnownEntry]) -> list[dict]:
+    """Entries as they are written to a list, for this file format or a pack."""
+    return [
+        {
+            "id": entry.sid,
+            "note": entry.note,
+            "tags": entry.tags,
+            "hashes": sorted(f"{h:016x}" for h in entry.hashes),
+            "thumbnail": (
+                base64.b64encode(entry.thumbnail).decode("ascii") if entry.thumbnail else None
+            ),
+        }
+        for entry in entries
+    ]
+
+
+def parse_hash(raw: object) -> int:
     if not isinstance(raw, str) or len(raw) != 16:
         raise SignatureFileError(f"not a 64-bit hash: {raw!r}")
     try:
@@ -157,11 +165,15 @@ def read_known(path: Path) -> list[KnownEntry]:
             f"{path.name} is version {payload.get('version')}, "
             f"this app reads version {FILE_VERSION}"
         )
-    rows = payload.get("entries")
+    return parse_known_rows(payload.get("entries"), path.name)
+
+
+def parse_known_rows(rows: object, source_name: str) -> list[KnownEntry]:
+    """Validate the entries of a known-junk list, from a file or a review pack."""
     if not isinstance(rows, list):
-        raise SignatureFileError(f"{path.name} has no entries")
+        raise SignatureFileError(f"{source_name} has no entries")
     if len(rows) > _MAX_ENTRIES:
-        raise SignatureFileError(f"{path.name} has more than {_MAX_ENTRIES} entries")
+        raise SignatureFileError(f"{source_name} has more than {_MAX_ENTRIES} entries")
 
     entries: list[KnownEntry] = []
     for row in rows:
@@ -172,7 +184,7 @@ def read_known(path: Path) -> list[KnownEntry]:
             raise SignatureFileError("an entry has no hashes")
         if len(raw_hashes) > _MAX_HASHES_PER_ENTRY:
             raise SignatureFileError("an entry has too many hashes")
-        hashes = {_parse_hash(h) for h in raw_hashes}
+        hashes = {parse_hash(h) for h in raw_hashes}
         thumbnail = None
         raw_thumb = row.get("thumbnail")
         if isinstance(raw_thumb, str):
@@ -194,6 +206,8 @@ def read_known(path: Path) -> list[KnownEntry]:
                 created_at=0.0,
                 thumbnail=thumbnail,
                 hashes=hashes,
+                # Lists written before tags existed simply have none.
+                tags=str(row.get("tags") or "")[:_MAX_TAGS],
             )
         )
     return entries
@@ -201,13 +215,36 @@ def read_known(path: Path) -> list[KnownEntry]:
 
 def import_known(cache: HashCache, path: Path) -> ImportResult:
     """Merge a list into the store. Nothing is stored if the file is invalid."""
+    return store_known(cache, read_known(path))
+
+
+def store_known(cache: HashCache, entries: Iterable[KnownEntry]) -> ImportResult:
+    """Merge already-validated entries into the store, as imported."""
     result = ImportResult()
-    for entry in read_known(path):
+    for entry in entries:
         if cache.remember(
             entry.sid, entry.hashes, note=entry.note,
-            thumbnail=entry.thumbnail, source="imported",
+            thumbnail=entry.thumbnail, source="imported", tags=entry.tags,
         ):
             result.added += 1
         else:
             result.merged += 1
     return result
+
+
+def imported_only(
+    groups: Iterable[DuplicateGroup], removed: Iterable[int], threshold: int
+) -> list[DuplicateGroup]:
+    """Marked known-junk groups that only an imported list vouches for.
+
+    A group near a page removed from this library before has been seen by the
+    user; one matching nothing but someone else's list has not. Those are the
+    ones worth a second question before they are deleted.
+    """
+    mine = set(removed)
+    return [
+        group for group in groups
+        if group.known
+        and group.decision is Decision.DELETE
+        and not matches_any((p.dhash for p in group.pages), mine, threshold)
+    ]

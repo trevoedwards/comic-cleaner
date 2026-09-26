@@ -38,3 +38,18 @@ CI builds every platform and, if the tag matches both version numbers, publishes
 a GitHub release with `ComicCleaner-<version>-windows-x64.exe`,
 `comiccleaner-cli-<version>-windows-x64.exe`,
 `…-macos-arm64.zip`, `…-linux-x64.tar.gz` and a `SHA256SUMS.txt`.
+
+## Optional: signing and PyPI
+
+Two more workflows run only when started by hand from the Actions tab. Neither
+runs on a tag, and neither touches the release above.
+
+- **Sign and notarize (macOS)** (`sign-macos.yml`) builds the app, signs it with
+  a Developer ID certificate, notarizes and staples it, and keeps the result as a
+  workflow artifact. It needs the secrets `MACOS_CERTIFICATE` (base64 `.p12`),
+  `MACOS_CERTIFICATE_PASSWORD`, `MACOS_SIGNING_IDENTITY`, `APPLE_ID`,
+  `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD`. If any is missing it logs that
+  signing was skipped and succeeds.
+- **PyPI package** (`pypi.yml`) builds the sdist and wheel, checks them with
+  `twine check`, and keeps them as an artifact. It uploads to PyPI only when the
+  `PYPI_TOKEN` secret is set; otherwise it logs that the upload was skipped.

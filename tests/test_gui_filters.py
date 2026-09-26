@@ -129,13 +129,13 @@ def test_the_book_selection_survives_a_regroup(window, tmp_path):
 def test_each_book_says_how_many_of_its_pages_repeat(window, tmp_path):
     _scanned(window, tmp_path / "lib")
     texts = {window.archive_list.item(r).text() for r in range(window.archive_list.count())}
-    assert any(t.startswith("A.cbz") and "2 repeated" in t for t in texts)
-    assert any(t.startswith("C.cbz") and "1 repeated" in t for t in texts)
+    assert any(t.startswith("Test Series #A") and "2 repeated" in t for t in texts)
+    assert any(t.startswith("Test Series #C") and "1 repeated" in t for t in texts)
 
     window._set_all_decisions(Decision.DELETE)
 
     texts = {window.archive_list.item(r).text() for r in range(window.archive_list.count())}
-    assert any(t.startswith("A.cbz") and "2 to remove" in t for t in texts)
+    assert any(t.startswith("Test Series #A") and "2 to remove" in t for t in texts)
 
 
 def test_the_search_box_hides_books_that_do_not_match(window, tmp_path):
@@ -147,7 +147,7 @@ def test_the_search_box_hides_books_that_do_not_match(window, tmp_path):
         window.archive_list.item(r).text() for r in range(window.archive_list.count())
         if not window.archive_list.item(r).isHidden()
     ]
-    assert len(shown) == 1 and shown[0].startswith("B.cbz")
+    assert len(shown) == 1 and shown[0].startswith("Test Series #B")
 
 
 # -- by kind ---------------------------------------------------------------

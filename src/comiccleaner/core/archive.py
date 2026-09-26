@@ -209,6 +209,15 @@ class ComicArchive:
             return file.stat(follow_symlinks=False).st_size if file else 0
         raise ArchiveError("archive is not open")
 
+    def entry_date(self, name: str) -> tuple[int, int, int, int, int, int] | None:
+        """The zip timestamp of an entry, or None where there is none (RAR/7z)."""
+        if self._zip is not None:
+            try:
+                return self._zip.getinfo(name).date_time
+            except KeyError:
+                return None
+        return None
+
     def stored_size(self, name: str) -> int:
         """On-disk cost of an entry — what we actually reclaim by removing it."""
         if self._zip is not None:
@@ -261,16 +270,21 @@ def write_cbz(
 
     Images are stored uncompressed by default — they already are. Deflating a
     JPEG costs CPU and saves ~0%; XML is the one thing worth compressing.
+
+    Entries copied from a zip keep their original timestamps, so a cleaned book
+    still shows when each page was made; pages extracted from a RAR or 7z have
+    none to keep and are stamped with the time of writing.
     """
     mode = zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED
     replace = replace or {}
+    now = time.localtime(time.time())[:6]
     with zipfile.ZipFile(dest, "w") as zf:
         for name in names:
             per_entry = zipfile.ZIP_DEFLATED if name.lower().endswith(".xml") else mode
             if name in replace:
                 zf.writestr(name, replace[name], compress_type=per_entry)
                 continue
-            info = zipfile.ZipInfo(name, date_time=time.localtime(time.time())[:6])
+            info = zipfile.ZipInfo(name, date_time=source.entry_date(name) or now)
             info.compress_type = per_entry
             info.external_attr = 0o600 << 16  # what writestr gives a named entry
             # Known up front, so zipfile can choose zip64 for a huge entry.

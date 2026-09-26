@@ -1,0 +1,42 @@
+name: PyPI package
+
+# Run by hand from the Actions tab; never on a tag. Builds the sdist and wheel
+# and keeps them as a workflow artifact. They are uploaded to PyPI only when the
+# PYPI_TOKEN secret is set; without it the job says so and still succeeds.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: comiccleaner-python-package
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload to PyPI
+        env:
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        shell: bash
+        run: |
+          if [ -z "$PYPI_TOKEN" ]; then
+            echo "PyPI upload skipped: the PYPI_TOKEN secret is not set."
+            exit 0
+          fi
+          TWINE_USERNAME=__token__ TWINE_PASSWORD="$PYPI_TOKEN" python -m twine upload dist/*

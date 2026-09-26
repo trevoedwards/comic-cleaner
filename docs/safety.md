@@ -15,7 +15,16 @@ Removal is the only destructive operation, and it is deliberately paranoid:
 - A book that would lose more than a quarter of its pages is skipped, in the app
   and on the command line alike, and the confirmation lists it. Adverts are a
   page or three; a bigger match is usually two copies of the same issue.
+- The confirmation shows each book's share of pages removed and its first page
+  names, and lists any book that would lose its first or last page, since that
+  is often a cover. **Save Plan…** writes it all to JSON and CSV first if you
+  want a record (`clean --plan FILE` on the command line).
+- Books in a protected folder (Settings) are never rewritten.
+- With **Copy removed pages to** set (`--quarantine`), every removed page is
+  copied out before its book is replaced, and a book whose pages cannot be
+  copied is not touched.
 - A file locked by another program is skipped with an explanation, not mangled.
+- Pages copied from a zip keep their original timestamps.
 - Books are rebuilt one entry at a time, so a huge book never has to fit in memory.
 - Links inside a `.cbr` or `.cb7` are ignored, never followed, so a crafted
   archive cannot pull in a file from elsewhere on your computer.
@@ -38,6 +47,15 @@ lists them, and puts any book back exactly as it was while its backup exists:
 the cleaned version is discarded, and a `.cbr` that was rebuilt as `.cbz` gets
 its `.cbr` back. A book changed since the run is left alone rather than
 overwritten. **Export CSV…** writes the whole record out for a spreadsheet.
+**Pin** a run to keep its backups through **Clean Up Backups…**, or delete just
+one run's backups with **Delete Backups for This Run…** (refused while it is
+pinned). Before a restore, the first page of the backup is shown.
+**Clean Up Backups…** reports how much space every backup uses, not only the
+ones it offers to delete.
+
+If a book from last session has moved, **Look in Folder…** on the missing-books
+notice finds it by name, size and date (nothing is re-hashed) and carries its
+review over. A book with several matching files, or none, is left as it was.
 
 > [!WARNING]
 > `.cbr` and `.cb7` cannot be written to. Removing pages from one produces a

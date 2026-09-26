@@ -17,7 +17,41 @@ comiccleaner clean /incoming --known --yes          # only what was removed befo
 comiccleaner known export junk.json                 # share the known-junk list
 comiccleaner history list                           # past runs
 comiccleaner history restore 12 --yes               # put run 12's books back
+comiccleaner clean /comics --all --dry-run --plan plan.json   # write the plan down
+comiccleaner clean /comics --known --yes --quarantine /removed # keep copies of what goes
+comiccleaner pack export review-pack.json           # known junk + ignore list, one file
+comiccleaner pack import review-pack.json           # merge one in
 ```
+
+`--plan FILE` writes every book the run would clean or skip, with the pages,
+the share of the book and whether it was a dry run, before anything else
+happens; with `--dry-run` nothing else is written. `--quarantine DIR` copies each
+removed page into `DIR/<book name>/` before the book is replaced; a book whose
+pages cannot be copied is left untouched and reported as failed.
+
+`--exclude GLOB` (repeatable, on `scan` and `clean`) leaves out files whose name,
+or path relative to a folder you named, matches: `--exclude '*sample*'
+--exclude 'Scans/*'`. `--edge-window N` (default 3, at most 10) sets how close
+to either end of a book counts as "near the edge" for ranking and for the
+mid-book warning; it does not change `--edges`, which limits what `clean`
+removes. PDFs are skipped with a note: PDF is not supported.
+
+`scan` also reports books that look like the **same issue twice** (at least 80%
+of the smaller book's pages byte-identical to the other's), one line per pair,
+and under `"duplicate_books"` in `--json`. Nothing is removed because of it.
+
+`pack` moves the known-junk list and the ignore list between machines. A pack
+exported from the GUI also carries its matching settings; the command line has
+no saved settings, so it never writes them and only mentions them on import.
+
+A library server hook, after new books arrive:
+
+```bash
+comiccleaner clean /library --known --yes
+```
+
+It removes only pages already remembered as known junk, so it never acts on a
+match nobody has reviewed, and it will not find new adverts.
 
 `clean --known` is the one to schedule: it removes only pages already removed
 from this library once (or imported as known junk), so it never acts on a match

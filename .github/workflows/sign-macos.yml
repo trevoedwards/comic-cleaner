@@ -1,0 +1,101 @@
+name: Sign and notarize (macOS)
+
+# Run by hand from the Actions tab. Builds the macOS app, then signs, notarizes
+# and staples it, but only when every signing secret below is set. Without them
+# it builds, says signing was skipped, and still succeeds. It publishes nothing:
+# the signed app is left as a workflow artifact.
+#
+# Secrets:
+#   MACOS_CERTIFICATE           base64 of a "Developer ID Application" .p12
+#   MACOS_CERTIFICATE_PASSWORD  the .p12's password
+#   MACOS_SIGNING_IDENTITY      e.g. "Developer ID Application: Name (TEAMID)"
+#   APPLE_ID                    the Apple ID used to notarize
+#   APPLE_TEAM_ID               the team the certificate belongs to
+#   APPLE_APP_PASSWORD          an app-specific password for that Apple ID
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sign:
+    runs-on: macos-latest
+    env:
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+
+    steps:
+      - name: Check for signing credentials
+        id: creds
+        shell: bash
+        run: |
+          missing=""
+          for name in MACOS_CERTIFICATE MACOS_CERTIFICATE_PASSWORD MACOS_SIGNING_IDENTITY \
+                      APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+            if [ -z "${!name}" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "Signing skipped: these secrets are not set:$missing"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.creds.outputs.present == 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.creds.outputs.present == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build the app
+        if: steps.creds.outputs.present == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,build]"
+          python build.py --clean --smoke-test
+
+      - name: Import the certificate into a temporary keychain
+        if: steps.creds.outputs.present == 'true'
+        shell: bash
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: Sign, notarize and staple
+        if: steps.creds.outputs.present == 'true'
+        shell: bash
+        run: |
+          app=dist/ComicCleaner.app
+          codesign --force --deep --timestamp --options runtime \
+            --sign "$MACOS_SIGNING_IDENTITY" "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          ditto -c -k --keepParent "$app" ComicCleaner-notarize.zip
+          xcrun notarytool submit ComicCleaner-notarize.zip --wait \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+          xcrun stapler staple "$app"
+          version=$(grep '^__version__' src/comiccleaner/__init__.py | cut -d'"' -f2)
+          mkdir release
+          ditto -c -k --keepParent "$app" "release/ComicCleaner-$version-macos-arm64-signed.zip"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.creds.outputs.present == 'true'
+        with:
+          name: ComicCleaner-macos-signed
+          path: release/*
+          if-no-files-found: error
+          retention-days: 14
