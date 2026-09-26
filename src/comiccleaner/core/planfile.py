@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import APP_NAME, __version__
+from .archive import SEP_ALT
 from .remover import RemovalPlan
 
 FILE_FORMAT = "comiccleaner-plan"
@@ -25,15 +26,24 @@ SKIPPED_PROTECTED = "in a protected folder"
 
 
 def describe_plan(plan: RemovalPlan, names: int = 3) -> str:
-    """One line for a book: how much goes, and the first few pages by name."""
+    """One line for a book: how much goes, and the first few pages by name.
+
+    Only each name's last part is shown: many archives keep their pages in a
+    folder named after the whole release, which would push the line off screen.
+    The saved plan keeps the full entry names.
+    """
     listed = plan.ordered_names
-    shown = ", ".join(listed[:names])
+    shown = ", ".join(_file_part(name) for name in listed[:names])
     more = f" and {len(listed) - names} more" if len(listed) > names else ""
     total = f" of {plan.original_pages}" if plan.original_pages else ""
     return (
         f"removing {len(listed)}{total} ({plan.fraction:.0%}), "
         f"{max(plan.remaining_pages, 0)} left: {shown}{more}"
     )
+
+
+def _file_part(name: str) -> str:
+    return name.replace(SEP_ALT, "/").rsplit("/", 1)[-1]
 
 
 def _record(plan: RemovalPlan, status: str, reason: str, dry_run: bool) -> dict[str, Any]:

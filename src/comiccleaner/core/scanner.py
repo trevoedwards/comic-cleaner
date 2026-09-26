@@ -301,26 +301,37 @@ class ScanStats:
     """Running totals for a scan, and a rough time left.
 
     Books that come straight from the cache take no time, so the estimate is
-    built from the uncached books alone: the wall-clock time spent per uncached
-    book so far, times how many of the remaining books are likely to need
-    hashing, going by the share that did so far.
+    built from the uncached books alone. It goes by bytes where the sizes are
+    known: a trade paperback can be ten times an issue, and the small books
+    finish first, so counting books would call the end near while the biggest
+    ones are still being read. Without sizes it falls back to counting books.
     """
 
-    def __init__(self, total: int, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        total: int,
+        total_bytes: int = 0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.total = total
+        self.total_bytes = total_bytes
         self.done = 0
+        self.bytes_done = 0
         self.pages_hashed = 0
         self.pages_cached = 0
         self.uncached_books = 0
+        self.uncached_bytes = 0
         self._clock = clock
         self._started = clock()
 
     def record(self, info: ArchiveInfo) -> None:
         self.done += 1
+        self.bytes_done += info.size
         if info.cached:
             self.pages_cached += info.page_count
         else:
             self.uncached_books += 1
+            self.uncached_bytes += info.size
             self.pages_hashed += info.page_count
 
     def eta(self) -> float | None:
@@ -330,9 +341,14 @@ class ScanStats:
             return 0.0
         if not self.uncached_books:
             return None
-        per_book = (self._clock() - self._started) / self.uncached_books
-        still_to_hash = remaining * self.uncached_books / self.done
-        return per_book * still_to_hash
+        elapsed = self._clock() - self._started
+        if self.total_bytes and self.uncached_bytes:
+            left = max(self.total_bytes - self.bytes_done, 0)
+            # Of what remains, the share likely to need hashing, going by so far.
+            still_to_hash = left * self.uncached_bytes / max(self.bytes_done, 1)
+            return elapsed * still_to_hash / self.uncached_bytes
+        per_book = elapsed / self.uncached_books
+        return per_book * remaining * self.uncached_books / self.done
 
     def describe(self) -> str:
         """For example "120 pages hashed, 3,400 from cache, about 2 min left"."""

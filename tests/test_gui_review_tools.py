@@ -486,6 +486,46 @@ def test_the_library_can_be_grouped_and_folded(window, tmp_path):
     window._update_library_texts()
 
 
+def _click(window: MainWindow, item) -> None:
+    from PySide6.QtTest import QTest
+
+    rect = window.archive_list.visualItemRect(item)
+    QTest.mouseClick(
+        window.archive_list.viewport(), Qt.MouseButton.LeftButton, pos=rect.center()
+    )
+
+
+def test_clicking_a_heading_folds_it_and_keeps_other_books_selected(window, tmp_path):
+    """A click on a heading used to clear the whole selection, not only the
+    books it hid, so the groups snapped back to showing every book."""
+    for folder in ("Alpha", "Beta"):
+        for number in range(2):
+            write_archive(
+                tmp_path / folder / f"{folder} {number}.cbz", [make_page(number)],
+                comicinfo=False,
+            )
+    window.import_paths([tmp_path / "Alpha", tmp_path / "Beta"])
+    window.act_group_library.setChecked(True)
+    window.show()
+    rows = [window.archive_list.item(r) for r in range(window.archive_list.count())]
+    alpha, beta = (r for r in rows if r.data(ROLE_HEADER) is not None)
+    alpha_book, beta_book = rows[1], rows[4]
+    alpha_book.setSelected(True)
+    beta_book.setSelected(True)
+    assert len(window._library_selection) == 2
+
+    _click(window, alpha)
+
+    assert alpha_book.isHidden() and not alpha_book.isSelected()
+    assert beta_book.isSelected()
+    assert window._library_selection == {Path(beta_book.data(USER_ROLE))}
+    assert not alpha.isSelected()
+
+    _click(window, alpha)
+    assert not alpha_book.isHidden()
+    assert beta_book.isSelected()
+
+
 def test_a_pdf_is_named_as_unsupported(window, tmp_path, monkeypatch):
     pdf = tmp_path / "comic.pdf"
     pdf.write_bytes(b"%PDF-1.7")

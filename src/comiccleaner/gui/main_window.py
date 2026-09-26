@@ -11,8 +11,20 @@ from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
-from PySide6.QtCore import QEvent, QEventLoop, QPoint, QProcess, QSize, Qt, QTimer, QUrl, Slot
+from PySide6.QtCore import (
+    QEvent,
+    QEventLoop,
+    QObject,
+    QPoint,
+    QProcess,
+    QSize,
+    Qt,
+    QTimer,
+    QUrl,
+    Slot,
+)
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -24,6 +36,7 @@ from PySide6.QtGui import (
     QFont,
     QGuiApplication,
     QKeySequence,
+    QMouseEvent,
     QPalette,
     QPixmap,
     QShortcut,
@@ -574,7 +587,11 @@ class MainWindow(QMainWindow):
         self.archive_list.setAccessibleName("Library")
         self.archive_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.archive_list.customContextMenuRequested.connect(self._library_menu)
-        self.archive_list.itemClicked.connect(self._on_library_item_clicked)
+        # Headings are handled before the list sees the press: a plain click on a
+        # row that cannot be selected would otherwise clear the whole selection,
+        # and with it the books narrowing the groups.
+        self._heading_clicks = _HeadingClicks(self.archive_list, self._on_library_item_clicked)
+        self.archive_list.viewport().installEventFilter(self._heading_clicks)
         # Scoped to the list: Delete elsewhere must never drop books from the library.
         _widget_shortcut(
             QKeySequence(QKeySequence.StandardKey.Delete),
@@ -3104,6 +3121,32 @@ class _ConfirmDialog(QDialog):
             self, "Plan saved", f"Wrote {path.name} and {csv_path.name}. Nothing was changed."
         )
         return path, csv_path
+
+
+class _HeadingClicks(QObject):
+    """Folds a library heading on click, without the click reaching the list."""
+
+    _EVENTS = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
+
+    def __init__(
+        self, listing: QListWidget, fold: Callable[[QListWidgetItem], None]
+    ) -> None:
+        super().__init__(listing)
+        self._listing = listing
+        self._fold = fold
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() not in self._EVENTS:
+            return False
+        press = cast(QMouseEvent, event)
+        if press.button() is not Qt.MouseButton.LeftButton:
+            return False
+        item = self._listing.itemAt(press.position().toPoint())
+        if item is None or item.data(ROLE_HEADER) is None:
+            return False
+        if event.type() == QEvent.Type.MouseButtonPress:
+            self._fold(item)
+        return True  # a double-click must not fold it straight back
 
 
 class _Panel(QWidget):

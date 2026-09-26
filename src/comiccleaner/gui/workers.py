@@ -97,6 +97,15 @@ class SurveyWorker(QThread):
         self.finished_survey.emit(result)
 
 
+def _total_size(paths: list[Path]) -> int:
+    """Bytes in all of `paths`, for the scan's time estimate; missing ones count 0."""
+    total = 0
+    for path in paths:
+        with contextlib.suppress(OSError):
+            total += Path(path).stat().st_size
+    return total
+
+
 class ScanWorker(QThread):
     """Hashes every page of the given archives without blocking the UI."""
 
@@ -127,6 +136,8 @@ class ScanWorker(QThread):
 
     def run(self) -> None:
         try:
+            # Here, off the UI thread: a stat per book adds up on a network share.
+            self.stats.total_bytes = _total_size(self._paths)
             results: list[ArchiveInfo] = scan_archives(
                 self._paths,
                 cache=self._cache,

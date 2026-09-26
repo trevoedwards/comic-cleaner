@@ -84,6 +84,22 @@ def test_a_plan_names_its_share_and_first_pages_in_reading_order():
     assert describe_plan(short) == "removing 1 of 4 (25%), 3 left: a.jpg"
 
 
+def test_plan_lines_show_only_the_file_part_of_each_page():
+    folder = "Batman 001 (1992) (Digital) (Group)"
+    plan = RemovalPlan(
+        archive=Path("Batman 001.cbz"),
+        remove_names={f"{folder}/Batman 001-024.jpg", "scans\\zzTag.jpg"},
+        original_pages=25,
+        indices={f"{folder}/Batman 001-024.jpg": 23, "scans\\zzTag.jpg": 24},
+    )
+    assert describe_plan(plan) == (
+        "removing 2 of 25 (8%), 23 left: Batman 001-024.jpg, zzTag.jpg"
+    )
+    # The saved plan keeps the full names, so it still identifies each entry.
+    [record] = plan_records([plan], dry_run=True)
+    assert record["removed_entries"][0] == f"{folder}/Batman 001-024.jpg"
+
+
 def test_plans_know_when_they_take_a_cover_or_a_last_page(library):
     groups, counts = _marked(library, threshold=8, skip_first_page=False)
     [plan, *_] = build_plans(groups, counts)

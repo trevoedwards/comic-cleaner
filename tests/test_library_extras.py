@@ -86,10 +86,27 @@ def test_a_walk_reports_its_folders_and_can_be_stopped(tmp_path):
 # -- scan statistics -------------------------------------------------------
 
 
-def _info(pages: int, cached: bool) -> ArchiveInfo:
-    info = ArchiveInfo(path=Path("x.cbz"), kind=ArchiveKind.ZIP, size=0, mtime_ns=0,
+def _info(pages: int, cached: bool, size: int = 0) -> ArchiveInfo:
+    info = ArchiveInfo(path=Path("x.cbz"), kind=ArchiveKind.ZIP, size=size, mtime_ns=0,
                        page_count=pages, cached=cached)
     return info
+
+
+def test_the_estimate_goes_by_size_so_big_books_left_are_not_called_quick():
+    """Ten issues finish first, then three volumes ten times their size remain.
+    Counting books called that "about 1 s left"; by size it is most of the scan."""
+    issue, volume = 30_000_000, 300_000_000
+    now = [0.0]
+    stats = ScanStats(total=13, total_bytes=10 * issue + 3 * volume, clock=lambda: now[0])
+    for _ in range(10):
+        stats.record(_info(25, cached=False, size=issue))
+    now[0] = 5.0  # 300 MB in 5 s
+
+    assert abs(stats.eta() - 15.0) < 1e-9  # 900 MB left at the same rate
+    by_count = ScanStats(total=13, clock=lambda: now[0])
+    for _ in range(10):
+        by_count.record(_info(25, cached=False))
+    assert by_count.eta() < 2  # what the old estimate said
 
 
 def test_scan_stats_count_hashed_and_cached_pages_and_estimate_from_uncached_books():
