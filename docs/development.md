@@ -28,7 +28,26 @@ docker compose run --rm dev python -m comiccleaner clean /comics --all --dry-run
 ```
 
 GUI tests drive the real window through Qt's `offscreen` platform, so the suite
-runs without a display. To check a *packaged* build (see
+runs without a display.
+
+## Trying the GUI by hand
+
+The `gui` service runs the real window on a virtual display and serves it to a
+browser with noVNC, so it works on a machine with no desktop session, over SSH:
+
+```bash
+docker compose up gui                             # Ctrl+C to stop
+```
+
+Then open <http://localhost:6080/vnc.html?autoconnect=1&resize=scale>. From
+another machine, forward the port first: `ssh -L 6080:localhost:6080 <host>`.
+The port is published on localhost only, and the VNC session has no password.
+
+On first start it copies the test comics into `.gui/library`, a writable library
+where removals can really be applied and restored; `.gui/home` keeps the app's
+settings, cache and history between runs. Delete `.gui/` to start fresh. Closing
+the window starts it again. `CC_GUI_SIZE` (default `1600x1000x24`) and
+`CC_GUI_PORT` (default `6080`) in `.env` change the screen size and port. To check a *packaged* build (see
 [Building a binary](building.md)):
 
 ```bash

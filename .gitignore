@@ -16,8 +16,9 @@ coverage.xml
 *.sqlite-wal
 *.sqlite-shm
 
-# Local paths (test comics mount).
+# Local paths (test comics mount) and the GUI service's state.
 .env
+.gui/
 
 # Crash reports from local runs.
 crashlog/

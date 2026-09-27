@@ -1,0 +1,12 @@
+# The image only copies pyproject.toml, README.md and src/; keep the rest out of
+# the build context, above all the GUI service's copied library.
+.git/
+.gui/
+.venv/
+build/
+dist/
+crashlog/
+**/__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
