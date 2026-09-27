@@ -19,42 +19,55 @@ Linux binaries). Since 0.2.0:
   screen (its minimum was about 1500 px). On Linux's Fusion style, dark-theme
   check boxes and placeholder text are visible.
 
-**On `master`, not yet released:**
+**On `master`, not yet released** (all 2026-09-27; CI green on `0f35309`,
+with the strict type check). The owner wants to keep working before the next
+release: do not bump the version or push a tag until they ask.
 
-- `1b11dca`, found by the Windows check below: the main window and the preview
-  open no larger than the screen (they were fixed at 1400x860 and 1100x820, and
-  on 1280x800 the preview's Close button was under the taskbar), and a selected
-  row takes the selection's text colour under the Windows styles (it was black
-  on navy in high contrast). Verified on Windows 11 with the CI build.
-- **The official 7-Zip everywhere** (decided 2026-09-27). The app recommends it
-  on every platform (`7zz` from 7-zip.org on Linux and macOS) instead of
-  `unrar`: Debian's, Ubuntu's, Fedora's and Homebrew's 7-Zip are built without
-  the RAR codec, whose licence forbids using it to re-create RAR compression,
-  so they read `.cb7` but not `.cbr`. With several 7-Zips installed, the first
-  that reads RAR is used. The Settings "UnRAR" row lists only UnRAR itself.
-  The Docker image and CI install the official 26.03, pinned by digest (bump
-  `SEVENZIP_VERSION` and the digests together, in the Dockerfile and
-  `ci.yml`). UnRAR and bsdtar are still used when present.
-
-- **Leave .cbr and .cb7 books unchanged** (Settings → Removing, `--leave-cbr`):
-  those books are scanned and reviewed but never rewritten or converted; a zip
-  named `.cbr` counts too. Apply and `clean` list them, plan files give the
-  reason, and `--json` has `left_unchanged`. The README gained "Why CBZ?".
-- At the window's minimum width the library column keeps 30 characters
-  (about 180 px) instead of shrinking to about 75; the minimum is 1100 px on
-  Linux, which still fits a 1280 px screen.
-- Group rows line up: every thumbnail gets the list's full 72 px box, so the
-  text no longer starts wherever the thumbnail's shape left it.
-- `tests/test_real_comics.py` scans and cleans the real Green Lantern Corps
-  `.cbr` books from `/comics` (the test comics folder, read-only); it skips
-  wherever they are not mounted, which includes CI.
-
-The owner wants to keep working before the next release (2026-09-27): do not
-bump the version or push a tag until they ask.
+- **Windows fixes** (`1b11dca`, found by the Windows check below): the main
+  window and the preview open no larger than the screen (they were fixed at
+  1400x860 and 1100x820, and on 1280x800 the preview's Close button was under
+  the taskbar), and a selected row takes the selection's text colour under the
+  Windows styles (it was black on navy in high contrast).
+- **The official 7-Zip everywhere** (`d1e50a2`). The app recommends it on every
+  platform (`7zz` from 7-zip.org on Linux and macOS) instead of `unrar`, which
+  0.2.2 asked for: Debian's, Ubuntu's, Fedora's and Homebrew's 7-Zip are built
+  without the RAR codec, whose licence forbids using it to re-create RAR
+  compression, so they read `.cb7` but not `.cbr`. With several 7-Zips
+  installed, the first that reads RAR is used. The Settings "UnRAR" row lists
+  only UnRAR itself. The Docker image and CI install the official 26.03,
+  pinned by digest (bump `SEVENZIP_VERSION` and the digests together, in the
+  Dockerfile and `ci.yml`). UnRAR and bsdtar are still used when present.
+- **Leave .cbr and .cb7 books unchanged** (`7c96b3d`; Settings → Removing,
+  `--leave-cbr`): those books are scanned and reviewed but never rewritten or
+  converted; a zip named `.cbr` counts too. Apply and `clean` list them, plan
+  files give the reason, and `--json` has `left_unchanged`. The README gained
+  "Why CBZ?": RAR cannot be written by open tools, Komga converts CBR to CBZ
+  before removing pages too, and `--output` or the new setting serve anyone
+  keeping originals as they are.
+- **Linked zoom in the preview** (`b0a98cd`): while comparing, both sides zoom
+  and pan together, relative to fitting, so a rescaled copy shows the same
+  part of the page; they keep their place when stepping, 1:1 gives the copy
+  real pixels with the reference following, and both captions are two lines
+  high so the images start level.
+- **Layout** (`9054a49`, `24f2c8b`): at the window's minimum width the library
+  column keeps 30 characters (about 180 px) instead of shrinking to about 75;
+  the minimum is 1100 px on Linux, which still fits 1280. Group rows line up:
+  every thumbnail gets the list's full 72 px box.
+- **Tests** (`4625d39`, `7c96b3d`): `tests/test_rar_archives.py` reads five of
+  libarchive's RAR4 and RAR5 archives (BSD-2-Clause, notice kept in
+  `tests/data/rar/`) through every RAR reader installed; CI runs them with
+  7-Zip on Linux, 7-Zip and bsdtar on macOS and Windows.
+  `tests/test_real_comics.py` scans and cleans the real Green Lantern Corps
+  `.cbr` books from `/comics`; they are copyrighted, so it skips wherever they
+  are not mounted, CI included.
+- **Type checking** (`a7b68c0`, `0f35309`): the whole package passes mypy, and
+  CI now fails on any mypy error rather than a list of files held clean. Run
+  `docker compose run --rm dev python -m mypy` with ruff and pytest; skipping
+  it locally is how one error reached CI today.
 
 Development moved to a Linux machine and into Docker on 2026-09-27. `dev` runs
-the tests; `gui` serves the real window to a browser over noVNC (see
-[Development](development.md)).
+the tests; `gui` serves the real window to a browser over noVNC, and has
+`xdotool` for driving it from a script (see [Development](development.md)).
 
 ### What was verified, and how
 
@@ -72,6 +85,11 @@ the tests; `gui` serves the real window to a browser over noVNC (see
   Settings and every theme. Four bugs found this way are fixed in 0.2.2.
 - **The released Linux binary on Debian 12** (glibc 2.36): its self-test read
   all 13 archives, `.cbr` included.
+- **Everything on `master` since 0.2.2** by tests, ruff and mypy in Docker
+  and on CI, and in the real window in the `gui` container: the leave-CBR
+  checkbox, linked zoom on the Green Lantern adverts, the library at the
+  1100 px minimum, and lined-up group rows. Only the `1b11dca` fixes have been
+  seen on a Windows desktop; see "Before the next release".
 
 ## Next steps: 0.3, in order
 
@@ -79,8 +97,8 @@ The milestone is getting Comic Cleaner to users, after checking the platform
 most of them will use. There are no users yet: no issues or stars, and the
 downloads are our own. Features beyond this wait for their feedback.
 
-1. **Done 2026-09-27: 0.2.2 checked by hand on Windows 11** (see "Tests that
-   still need running" for what that covered and what it found).
+1. **Done 2026-09-27: 0.2.2 checked by hand on Windows 11** (see "The Windows
+   11 check" for what that covered and what it found).
 2. **Publish to PyPI.** The name `comiccleaner` is not taken (checked
    2026-09-27). The owner creates the PyPI project and an API token and adds it
    as the `PYPI_TOKEN` secret; then run **PyPI package** (`pypi.yml`) from the
@@ -91,17 +109,9 @@ downloads are our own. Features beyond this wait for their feedback.
    and forum post, title options, a pre-posting checklist and a 0.2.2
    screenshot), but the owner is not announcing releases yet (2026-09-27).
    Leave it until they say otherwise.
-4. **Close the testing gaps** in CI and the preview:
-   - Done 2026-09-27: `tests/test_rar_archives.py` reads five of libarchive's
-     RAR4 and RAR5 test archives (stored, compressed, solid, Unicode names,
-     links) through every RAR reader installed, and rebuilds a solid one as a
-     CBZ. Their contents are text and binary data, not images, so a scan of a
-     real `.cbr` still has no fixture.
-   - Done 2026-09-27: while comparing, the preview's two sides zoom and pan
-     together (relative to fitting, so a rescaled copy lines up too), keep
-     their place when stepping, and 1:1 gives the copy real pixels with the
-     reference following. Both captions are two lines high, so the images
-     start level.
+4. **Done 2026-09-27: the testing gaps.** Real RAR4 and RAR5 archives are read
+   on every CI platform, and the preview's sides are linked while comparing
+   (see above). A scan of a real `.cbr` runs only locally, against `/comics`.
 5. **Optional: a Linux AppImage**, if people ask for something other than the
    tarball.
 6. **Decide: bundle the official 7-Zip in the release binaries**, as
@@ -119,7 +129,21 @@ Windows certificate cost money and need the owner's accounts), EPUB or PDF
 support, and Komga/Kavita integration beyond the post-import `clean --known`
 hook. Revisit once there is feedback.
 
-## Tests that still need running
+## Before the next release
+
+- **Check on Windows 11** what has only been seen on Linux: the leave-CBR
+  checkbox and its confirmation note, linked zoom with a rescaled copy, the
+  library at the window's minimum width, and the group rows. The native
+  Windows style draws lists and check boxes differently from Fusion. Use the
+  VM below, and ask the PageMaster session first.
+- **Release notes**: there is no CHANGELOG; the GitHub release notes are
+  generated from the commits (`--generate-notes`). The owner may want a short
+  summary of what changed since 0.2.2 in the release description instead.
+- Release as before: set the version in `pyproject.toml` and
+  `src/comiccleaner/__init__.py`, commit, tag `vX.Y.Z` and push the tag; CI
+  checks the tag against both and publishes the binaries.
+
+## The Windows 11 check
 
 **Windows 11, done 2026-09-27** on the VM at `~/VMs/pagemaster-win11`
 (1280x800, 100%; shared with PageMaster, so ask its session first), with
