@@ -113,7 +113,9 @@ Similar groups list the copies furthest from the reference first, so any page
 that single-linkage chained in shows up at the start, not buried.
 **Compare with this** (<kbd>P</kbd>) makes the copy on screen the reference,
 in any group. The wheel zooms, dragging pans, **1:1** (<kbd>1</kbd>) shows real
-pixels and **Fit** (<kbd>F</kbd>) goes back to the whole page.
+pixels and **Fit** (<kbd>F</kbd>) goes back to the whole page. While comparing,
+both sides zoom and pan together and show the same part of the page, even when
+one copy has been rescaled, and stay there as you step through the copies.
 
 ### More ways to review and apply
 

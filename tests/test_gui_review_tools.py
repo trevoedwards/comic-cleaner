@@ -820,6 +820,88 @@ def test_the_preview_zooms_and_can_compare_any_copy(window, tmp_path):
     dialog._on_page_loaded("late", None, "")  # a late answer after closing is ignored
 
 
+def _rescaled_ad_library(root: Path) -> Path:
+    """Three books sharing an advert; the third has it rescaled to 75%."""
+    import io
+
+    from PIL import Image
+
+    ad = make_page(seed=9000, size=(400, 600))
+    buffer = io.BytesIO()
+    Image.open(io.BytesIO(ad)).resize((300, 450)).save(buffer, format="JPEG", quality=92)
+    for number, copy in enumerate((ad, ad, buffer.getvalue())):
+        story = [make_page(seed=number * 100 + i) for i in range(6)]
+        write_archive(root / f"Book {number}.cbz", [story[0], copy, *story[1:]])
+    return root
+
+
+def _same_view(a, b) -> bool:
+    if a is None or b is None:
+        return False
+    return all(abs(x - y) < 1e-6 for x, y in zip(a, b, strict=True))
+
+
+def test_compare_mode_zooms_and_pans_both_panes_together(window, tmp_path):
+    """Each pane used to zoom and pan on its own, so the copies drifted apart."""
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+    from PySide6.QtTest import QTest
+
+    from comiccleaner.core.model import MatchKind
+
+    window.settings.threshold = 6
+    _scanned(window, _rescaled_ad_library(tmp_path / "lib"))
+    [group] = [g for g in window.groups if g.kind is MatchKind.SIMILAR]
+    pages = sorted(group.pages, key=lambda p: p.width)  # the rescaled copy first
+    dialog = PagePreviewDialog(group, pages, 0, window.thumbs, {}, window)
+    dialog.resize(1000, 700)
+    dialog.show()
+    try:
+        assert pump_until(lambda: len(dialog._images) >= 2 and all(dialog._images.values()), 15)
+        reference, copy = dialog.reference_pane.view, dialog.copy_pane.view
+        assert reference.pixmap().width() != copy.pixmap().width()  # 400 against 300
+        # Both images start at the same height and have the same room, whatever
+        # their captions say, so the same view state lines them up exactly.
+        assert reference.size() == copy.size()
+        assert reference.mapTo(dialog, QPoint(0, 0)).y() == copy.mapTo(dialog, QPoint(0, 0)).y()
+
+        # The wheel over the copy zooms the reference to the same part of the page.
+        where = QPoint(copy.width() // 4, copy.height() // 3)
+        wheel = QWheelEvent(
+            QPointF(where), QPointF(copy.mapToGlobal(where)), QPoint(0, 0), QPoint(0, 240),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase, False,
+        )
+        QApplication.sendEvent(copy, wheel)
+        assert not copy.fitted and not reference.fitted
+        assert _same_view(reference.view_state(), copy.view_state())
+
+        # Dragging the reference pans the copy with it.
+        before = copy.view_state()
+        middle = reference.rect().center()
+        QTest.mousePress(reference, Qt.MouseButton.LeftButton, pos=middle)
+        QTest.mouseMove(reference, middle + QPoint(-60, -40))
+        QTest.mouseRelease(reference, Qt.MouseButton.LeftButton, pos=middle + QPoint(-60, -40))
+        assert not _same_view(copy.view_state(), before)
+        assert _same_view(reference.view_state(), copy.view_state())
+
+        # Stepping to a copy at another size keeps the same part of the page.
+        dialog.step(1)
+        assert pump_until(lambda: all(dialog._images.values()), 15)
+        assert copy.pixmap().width() == 400
+        assert _same_view(reference.view_state(), copy.view_state())
+
+        # 1:1 is real pixels for the copy, and the reference follows it.
+        dialog.actual_size()
+        assert abs(copy.scale() - 1 / copy.devicePixelRatioF()) < 1e-9
+        assert _same_view(reference.view_state(), copy.view_state())
+
+        dialog.fit()
+        assert copy.fitted and reference.fitted
+    finally:
+        dialog.done(QDialog.DialogCode.Accepted)
+
+
 def test_remembered_pages_can_be_searched_and_described(window):
     window.cache.remember("0000000000000001", {1}, note="Group X credits")
     window.cache.remember("0000000000000002", {2}, note="shop advert")

@@ -92,8 +92,11 @@ downloads are our own. Features beyond this wait for their feedback.
      links) through every RAR reader installed, and rebuilds a solid one as a
      CBZ. Their contents are text and binary data, not images, so a scan of a
      real `.cbr` still has no fixture.
-   - In the preview, each side zooms and pans on its own; linking them while
-     comparing would keep the two copies lined up.
+   - Done 2026-09-27: while comparing, the preview's two sides zoom and pan
+     together (relative to fitting, so a rescaled copy lines up too), keep
+     their place when stepping, and 1:1 gives the copy real pixels with the
+     reference following. Both captions are two lines high, so the images
+     start level.
 5. **Optional: a Linux AppImage**, if people ask for something other than the
    tarball.
 6. **Decide: bundle the official 7-Zip in the release binaries**, as

@@ -7,7 +7,7 @@ from typing import cast
 
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QImage,
     QKeyEvent,
@@ -90,6 +90,9 @@ class _ZoomView(QWidget):
     image pixel per screen pixel, allowing for display scaling.
     """
 
+    # The wheel or a drag moved the image; the preview keeps the other pane in step.
+    view_changed = Signal()
+
     def __init__(self) -> None:
         super().__init__()
         self.setMinimumSize(200, 200)
@@ -160,6 +163,39 @@ class _ZoomView(QWidget):
             )
         return QRectF(self._origin, size)
 
+    def view_state(self) -> tuple[float, float, float] | None:
+        """How far this view is zoomed and where, or None while it is fitted.
+
+        The zoom is relative to fitting, and the point at the middle of the view
+        is a share of the image's width and height. So a view showing another
+        copy at another size, a rescaled advert say, shows the same part of the
+        page at the same size on screen.
+        """
+        if self._fitted or self._pixmap is None or self._pixmap.isNull():
+            return None
+        size = self._pixmap.deviceIndependentSize()
+        middle = (QPointF(self.width() / 2, self.height() / 2) - self._origin) / self._scale
+        return (
+            self._scale / self._fit_scale(),
+            middle.x() / max(size.width(), 1),
+            middle.y() / max(size.height(), 1),
+        )
+
+    def set_view_state(self, state: tuple[float, float, float] | None) -> None:
+        """Show what view_state() described; None fits the image."""
+        if state is None:
+            self.fit()
+            return
+        if self._pixmap is None or self._pixmap.isNull():
+            return
+        relative, across, down = state
+        size = self._pixmap.deviceIndependentSize()
+        self._fitted = False
+        self._scale = max(_MIN_ZOOM, min(_MAX_ZOOM, relative * self._fit_scale()))
+        middle = QPointF(across * size.width(), down * size.height())
+        self._origin = QPointF(self.width() / 2, self.height() / 2) - middle * self._scale
+        self.update()
+
     def zoom_by(self, factor: float, around: QPointF | None = None) -> None:
         """Zoom, keeping the image point under `around` (default: the middle) still."""
         if self._pixmap is None:
@@ -176,8 +212,9 @@ class _ZoomView(QWidget):
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         notches = event.angleDelta().y() / 120
-        if notches:
+        if notches and self._pixmap is not None:
             self.zoom_by(_ZOOM_STEP ** notches, event.position())
+            self.view_changed.emit()
         event.accept()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -195,6 +232,7 @@ class _ZoomView(QWidget):
             self._origin += event.position() - self._drag
             self._drag = event.position()
             self.update()
+            self.view_changed.emit()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
@@ -220,6 +258,12 @@ class _ImagePane(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self.caption = QLabel(caption)
         self.caption.setWordWrap(True)
+        # Room for two lines either way, so both panes' images start at the same
+        # height: a caption that wrapped used to push one image a line lower.
+        lines = self.caption.fontMetrics().lineSpacing() * 2
+        self.caption.setFixedHeight(lines + self.caption.contentsMargins().top()
+                                    + self.caption.contentsMargins().bottom())
+        self.caption.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.view = _ZoomView()
         layout.addWidget(self.caption)
         layout.addWidget(self.view, 1)
@@ -289,6 +333,9 @@ class PagePreviewDialog(QDialog):
         # last, and the last one that came back (key, image or None, share changed).
         self._diff_wanted: str | None = None
         self._diff: tuple[str, QPixmap | None, float] | None = None
+        # While comparing, both panes show the same part of the page: whichever is
+        # zoomed or dragged sets this, and the other follows (see _ZoomView.view_state).
+        self._shared_view: tuple[float, float, float] | None = None
 
         layout = QVBoxLayout(self)
         panes = QHBoxLayout()
@@ -302,6 +349,8 @@ class PagePreviewDialog(QDialog):
             self.reference_pane.hide()
         panes.addWidget(self.copy_pane, 1)
         layout.addLayout(panes, 1)
+        for pane in (self.reference_pane, self.copy_pane):
+            pane.view.view_changed.connect(partial(self._on_view_changed, pane.view))
 
         controls = QHBoxLayout()
         self.btn_prev = QPushButton("< Previous")
@@ -383,12 +432,35 @@ class PagePreviewDialog(QDialog):
         return [pane.view for pane in panes]
 
     def fit(self) -> None:
+        self._shared_view = None
         for view in self._views():
             view.fit()
 
     def actual_size(self) -> None:
+        """Real pixels for the copy; while comparing, the reference follows it.
+
+        Rescaled copies differ in size, so both at 1:1 would show different parts
+        of the page. The copy is the one being judged, so it gets the real pixels.
+        """
+        copy = self.copy_pane.view
+        copy.actual_size()
+        if self._compare:
+            self._shared_view = copy.view_state()
+            self.reference_pane.view.set_view_state(self._shared_view)
+
+    def _on_view_changed(self, source: _ZoomView) -> None:
+        if not self._compare:
+            return
+        self._shared_view = source.view_state()
         for view in self._views():
-            view.actual_size()
+            if view is not source:
+                view.set_view_state(self._shared_view)
+
+    def _keep_views_together(self) -> None:
+        """Re-apply the shared view to both panes, as their images arrive or change."""
+        if self._compare and self._shared_view is not None:
+            for view in self._views():
+                view.set_view_state(self._shared_view)
 
     def _toggle_diff(self) -> None:
         if self._compare:
@@ -404,6 +476,8 @@ class PagePreviewDialog(QDialog):
             self._compare = True
             self.reference_pane.show()
             self.chk_diff.setVisible(True)
+            # Start comparing from wherever the copy was zoomed to.
+            self._shared_view = self.copy_pane.view.view_state()
         self.reference_pane.caption.setText(
             f"<b>Reference</b> — {self._describe(page)}"
         )
@@ -476,6 +550,10 @@ class PagePreviewDialog(QDialog):
         return pixmap
 
     def _render(self) -> None:
+        self._render_panes()
+        self._keep_views_together()
+
+    def _render_panes(self) -> None:
         page = self.current_page()
         current, current_note = self._image(page)
         reference, reference_note = self._image(self._reference)
