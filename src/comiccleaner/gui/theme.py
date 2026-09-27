@@ -8,6 +8,7 @@ import sys
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QGuiApplication, QPalette
+from PySide6.QtWidgets import QApplication, QProxyStyle, QStyle
 
 log = logging.getLogger(__name__)
 
@@ -105,11 +106,42 @@ def apply_theme(theme: Theme) -> None:
 
     dark = system_is_dark() if theme.follows_system else theme is Theme.DARK
 
+    # Before the palette: a new style resets it.
+    _outline_checks_under_fusion(app)
     if theme is Theme.CONTRAST:
         app.setPalette(_contrast_palette(dark))
     else:
         app.setPalette(_dark_palette() if dark else _light_palette())
     _is_dark = dark
+
+
+class _OutlinedChecks(QProxyStyle):
+    """Fusion, with a visible edge round each check box on a dark palette.
+
+    Fusion fills a check box with the list colour and edges it in a shade of the
+    window colour. Dark, that edge vanishes: an unticked copy in the page grid
+    showed no box at all, and in high contrast neither did any check box.
+    """
+
+    def drawPrimitive(self, element, option, painter, widget=None) -> None:  # noqa: N802
+        super().drawPrimitive(element, option, painter, widget)
+        if element is not QStyle.PrimitiveElement.PE_IndicatorCheckBox or not _is_dark:
+            return
+        edge = QColor(option.palette.color(QPalette.ColorRole.Text))
+        edge.setAlpha(150)
+        painter.save()
+        painter.setPen(edge)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(option.rect.adjusted(0, 0, -1, -1))
+        painter.restore()
+
+
+def _outline_checks_under_fusion(app: QGuiApplication) -> None:
+    """Wrap Fusion, Qt's style on Linux, in _OutlinedChecks; native styles are left be."""
+    if not isinstance(app, QApplication) or isinstance(app.style(), _OutlinedChecks):
+        return
+    if app.style().name().lower() == "fusion":
+        app.setStyle(_OutlinedChecks("fusion"))
 
 
 def effective_is_dark() -> bool:
@@ -166,6 +198,8 @@ def _dark_palette() -> QPalette:
             QPalette.ColorRole.Highlight: QColor(64, 132, 214),
             QPalette.ColorRole.HighlightedText: QColor(255, 255, 255),
             QPalette.ColorRole.Link: QColor(110, 170, 240),
+            # Unset, it stays the light theme's near-black: "Filter books" vanished.
+            QPalette.ColorRole.PlaceholderText: QColor(150, 150, 156),
         },
         QColor(128, 128, 134),
     )
@@ -193,6 +227,9 @@ def _contrast_palette(dark: bool) -> QPalette:
             QPalette.ColorRole.Highlight: highlight,
             QPalette.ColorRole.HighlightedText: paper,
             QPalette.ColorRole.Link: highlight,
+            QPalette.ColorRole.PlaceholderText: (
+                QColor(170, 170, 170) if dark else QColor(85, 85, 85)
+            ),
         },
         QColor(128, 128, 128),
     )

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import ntpath
 import os
 import shutil
 import subprocess
@@ -70,6 +71,31 @@ def unrar_path() -> str | None:
     return _first_existing(["unrar", "7z", "7zz"], _UNRAR_CANDIDATES)
 
 
+def _is_unrar(path: str | None) -> bool:
+    """Whether `path` is UnRAR itself, rather than the 7-Zip `unrar_path` falls back to."""
+    # ntpath splits on both separators, so a Windows path reads right anywhere.
+    return path is not None and ntpath.basename(path).lower().startswith("unrar")
+
+
+@functools.lru_cache(maxsize=1)
+def sevenzip_reads_rar() -> bool:
+    """Whether the 7-Zip found can unpack RAR, going by the codecs `7z i` lists.
+
+    Debian and Ubuntu build 7-Zip without the RAR codec (it lives in non-free),
+    so there it reads .cb7 but fails on every .cbr. When the listing cannot be
+    read, 7-Zip is given the benefit of the doubt, as it was before this check.
+    """
+    sevenz = sevenzip_path()
+    if sevenz is None:
+        return False
+    try:
+        listing = _run([sevenz, "i"], timeout=10).stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return True
+    _, found, codecs = listing.partition("Codecs:")
+    return not found or "rar" in codecs.lower()
+
+
 @functools.lru_cache(maxsize=1)
 def bsdtar_path() -> str | None:
     """libarchive's tar, which also reads zip/rar/7z. Ships in Windows 10+."""
@@ -107,14 +133,16 @@ def describe_backends() -> dict[str, str | None]:
 
 def can_extract(kind: str) -> bool:
     """Whether any installed tool can read this kind of archive ("rar" or "7z")."""
-    if sevenzip_path() or bsdtar_path():
+    if bsdtar_path():
         return True
-    return kind == "rar" and unrar_path() is not None
+    if kind == "rar":
+        return _is_unrar(unrar_path()) or (sevenzip_path() is not None and sevenzip_reads_rar())
+    return sevenzip_path() is not None
 
 
 def refresh_backends() -> None:
     """Forget what was detected, so a tool installed since launch is found."""
-    for finder in (sevenzip_path, unrar_path, bsdtar_path):
+    for finder in (sevenzip_path, unrar_path, bsdtar_path, sevenzip_reads_rar):
         finder.cache_clear()
 
 
@@ -127,7 +155,12 @@ def install_hint() -> str:
         return "Install 7-Zip (free, from 7-zip.org) or WinRAR"
     if sys.platform == "darwin":
         return "Install 7-Zip with Homebrew (brew install sevenzip)"
-    return "Install 7-Zip from your package manager (the 7zip or p7zip-full package)"
+    if sevenzip_path() is not None and not sevenzip_reads_rar():
+        return (
+            "Install unrar from your package manager (the 7-Zip here was built "
+            "without RAR support, as Debian and Ubuntu build it)"
+        )
+    return "Install unrar and 7-Zip from your package manager (the unrar and 7zip packages)"
 
 
 def _run(cmd: list[str], *, timeout: int = 600) -> subprocess.CompletedProcess[bytes]:
@@ -169,7 +202,7 @@ def extract_all(archive: Path, dest: Path, *, kind: str) -> None:
     if not attempts:
         raise ExtractionError(
             f"No tool found to read {archive.suffix} files. "
-            "Install 7-Zip (or WinRAR) and restart the app."
+            f"{install_hint()}, then restart the app."
         )
 
     errors = []
@@ -182,6 +215,11 @@ def extract_all(archive: Path, dest: Path, *, kind: str) -> None:
         if proc.returncode == 0:
             return
         stderr = proc.stderr.decode("utf-8", "replace").strip()[:300]
-        errors.append(f"{Path(tool).name} exited {proc.returncode}: {stderr}")
+        detail = f": {stderr}" if stderr else ""
+        errors.append(f"{Path(tool).name} exited {proc.returncode}{detail}")
 
-    raise ExtractionError(f"Could not extract {archive.name}. Tried: " + "; ".join(errors))
+    message = f"Could not extract {archive.name}. Tried: " + "; ".join(errors)
+    if kind == "rar" and not can_extract("rar"):
+        # 7-Zip without its RAR codec fails with nothing on stderr; say why.
+        message += f". {install_hint()}."
+    raise ExtractionError(message)

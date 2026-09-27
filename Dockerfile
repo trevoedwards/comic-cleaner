@@ -29,6 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       xvfb \
       x11vnc \
       openbox \
+      xdotool \
       novnc \
       websockify \
       fonts-dejavu-core \

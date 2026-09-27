@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -157,7 +158,7 @@ def test_check_again_picks_up_a_new_install(window, tmp_path, monkeypatch, no_to
     window.recheck_archive_tools()
     assert refreshed
     assert window.tools_banner.isVisibleTo(window)
-    assert "Still no 7-Zip" in window.status_label.text()
+    assert "Still no archive tool" in window.status_label.text()
 
     # Installed now: the banner goes and the failed book is ready to retry.
     for where in ("comiccleaner.gui.main_window", "comiccleaner.gui.welcome"):
@@ -185,16 +186,22 @@ def test_unreadable_cbr_after_a_scan_suggests_7zip(window, tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize(
-    ("sevenzip", "unrar", "bsdtar", "rar", "sz"),
+    ("sevenzip", "reads_rar", "unrar", "bsdtar", "rar", "sz"),
     [
-        (None, None, None, False, False),
-        ("7z", None, None, True, True),
-        (None, "unrar", None, True, False),  # UnRAR reads RAR only
-        (None, None, "bsdtar", True, True),
+        (None, False, None, None, False, False),
+        ("7z", True, "7z", None, True, True),
+        # Debian and Ubuntu's 7-Zip: no RAR codec, and unrar_path falls back to it.
+        ("/usr/bin/7z", False, "/usr/bin/7z", None, False, True),
+        ("/usr/bin/7z", False, "/usr/bin/unrar", None, True, True),
+        (None, False, r"C:\Program Files\WinRAR\UnRAR.exe", None, True, False),
+        (None, False, None, "bsdtar", True, True),
     ],
 )
-def test_can_extract_matches_what_each_tool_reads(monkeypatch, sevenzip, unrar, bsdtar, rar, sz):
+def test_can_extract_matches_what_each_tool_reads(
+    monkeypatch, sevenzip, reads_rar, unrar, bsdtar, rar, sz
+):
     monkeypatch.setattr(extern, "sevenzip_path", lambda: sevenzip)
+    monkeypatch.setattr(extern, "sevenzip_reads_rar", lambda: reads_rar)
     monkeypatch.setattr(extern, "unrar_path", lambda: unrar)
     monkeypatch.setattr(extern, "bsdtar_path", lambda: bsdtar)
 
@@ -219,5 +226,92 @@ def test_refresh_backends_forgets_what_was_found(monkeypatch):
 @pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
 def test_install_hint_names_7zip_on_every_platform(monkeypatch, platform):
     monkeypatch.setattr(extern.sys, "platform", platform)
+    monkeypatch.setattr(extern, "sevenzip_path", lambda: None)
 
     assert "7-Zip" in extern.install_hint()
+
+
+# What `7z i` lists, trimmed. p7zip-full knows the RAR format but has no codec
+# to unpack it without the non-free p7zip-rar; Debian's 7zip lacks both.
+_P7ZIP_FULL = """
+Formats:
+ 0  ...F..................  Rar      rar r00       R a r ! 1A 07 00
+ 0 C...F..........c.a.m+..  7z       7z            7 z BC AF ' 1C
+
+Codecs:
+ 0 4ED   303011B BCJ2
+ 0  ED   30101   LZMA
+"""
+_WITH_RAR = _P7ZIP_FULL + """ 0  D    40301   Rar1
+ 0  D    40305   Rar5
+"""
+
+
+@pytest.mark.parametrize(
+    ("listing", "reads"),
+    [(_P7ZIP_FULL, False), (_WITH_RAR, True), ("7-Zip 9.20, no listing\n", True)],
+)
+def test_sevenzip_reads_rar_goes_by_the_codecs(monkeypatch, listing, reads):
+    monkeypatch.setattr(extern, "sevenzip_path", lambda: "/usr/bin/7z")
+    monkeypatch.setattr(
+        extern, "_run",
+        lambda cmd, timeout=600: subprocess.CompletedProcess(cmd, 0, listing.encode(), b""),
+    )
+    extern.sevenzip_reads_rar.cache_clear()
+    try:
+        assert extern.sevenzip_reads_rar() is reads
+    finally:
+        extern.sevenzip_reads_rar.cache_clear()
+
+
+def test_sevenzip_that_cannot_list_is_trusted(monkeypatch):
+    def fail(cmd, timeout=600):
+        raise OSError("gone")
+
+    monkeypatch.setattr(extern, "sevenzip_path", lambda: "/usr/bin/7z")
+    monkeypatch.setattr(extern, "_run", fail)
+    extern.sevenzip_reads_rar.cache_clear()
+    try:
+        assert extern.sevenzip_reads_rar() is True
+    finally:
+        extern.sevenzip_reads_rar.cache_clear()
+
+
+def test_linux_hint_asks_for_unrar_when_7zip_lacks_rar(monkeypatch):
+    monkeypatch.setattr(extern.sys, "platform", "linux")
+    monkeypatch.setattr(extern, "sevenzip_path", lambda: "/usr/bin/7z")
+    monkeypatch.setattr(extern, "sevenzip_reads_rar", lambda: False)
+
+    hint = extern.install_hint()
+    assert hint.startswith("Install unrar")
+    assert "without RAR support" in hint
+
+
+def test_a_rar_that_7zip_cannot_read_says_to_install_unrar(monkeypatch, tmp_path):
+    """Debian's 7-Zip fails a .cbr with nothing on stderr: 'Tried: 7z exited 2: '."""
+    monkeypatch.setattr(extern.sys, "platform", "linux")
+    monkeypatch.setattr(extern, "sevenzip_path", lambda: "/usr/bin/7z")
+    monkeypatch.setattr(extern, "unrar_path", lambda: "/usr/bin/7z")
+    monkeypatch.setattr(extern, "bsdtar_path", lambda: None)
+    monkeypatch.setattr(extern, "sevenzip_reads_rar", lambda: False)
+    monkeypatch.setattr(
+        extern, "_run", lambda cmd, timeout=600: subprocess.CompletedProcess(cmd, 2, b"", b"")
+    )
+
+    with pytest.raises(extern.ExtractionError) as caught:
+        extern.extract_all(tmp_path / "Book.cbr", tmp_path / "out", kind="rar")
+
+    assert "7z exited 2" in str(caught.value)
+    assert "Install unrar" in str(caught.value)
+
+
+def test_no_tool_at_all_gives_the_platform_hint(monkeypatch, tmp_path):
+    monkeypatch.setattr(extern.sys, "platform", "win32")
+    for finder in ("sevenzip_path", "unrar_path", "bsdtar_path"):
+        monkeypatch.setattr(extern, finder, lambda: None)
+
+    with pytest.raises(extern.ExtractionError) as caught:
+        extern.extract_all(tmp_path / "Book.cbr", tmp_path / "out", kind="rar")
+
+    assert "No tool found to read .cbr files" in str(caught.value)
+    assert "7-zip.org" in str(caught.value)

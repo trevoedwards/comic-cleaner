@@ -173,6 +173,37 @@ def test_finished_removal_does_not_leave_stale_groups_to_reapply(window, library
     assert not window.act_apply.isEnabled()
 
 
+def test_rewritten_books_are_rescanned_after_the_result_box_is_read(
+    window, library, monkeypatch
+):
+    """A real result box stays open while the removal thread exits. The thread's
+    end used to find nothing to rescan yet, and the books were never rescanned."""
+    from PySide6.QtWidgets import QDialog, QMessageBox
+
+    window.import_paths([library])
+    window.settings.threshold = 8
+    scan_and_wait(window)
+    window._set_all_decisions(Decision.DELETE)
+    monkeypatch.setattr(
+        "comiccleaner.gui.main_window._ConfirmDialog.exec",
+        lambda self: QDialog.DialogCode.Accepted,
+    )
+    monkeypatch.setattr("comiccleaner.gui.main_window._ConfirmDialog.dry_run", lambda self: False)
+
+    def read_slowly(box):
+        assert pump_until(lambda: window._removal_worker is None), "thread did not exit"
+        return QMessageBox.StandardButton.Ok
+
+    monkeypatch.setattr(QMessageBox, "exec", read_slowly)
+    window.apply_removals()
+
+    assert pump_until(
+        lambda: window._scan_worker is None
+        and all(info.page_count == 4 for info in window.archives.values())
+    ), "the rewritten books were not rescanned"
+    assert window.groups == []
+
+
 def test_dry_run_leaves_files_alone(window, library, monkeypatch):
     window.import_paths([library])
     window.settings.threshold = 8

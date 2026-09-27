@@ -25,7 +25,13 @@ from comiccleaner.gui.main_window import (  # noqa: E402
     MainWindow,
 )
 from comiccleaner.gui.settings import AppSettings  # noqa: E402
-from comiccleaner.gui.theme import Theme, apply_theme, colour, effective_is_dark  # noqa: E402
+from comiccleaner.gui.theme import (  # noqa: E402
+    Theme,
+    _OutlinedChecks,
+    apply_theme,
+    colour,
+    effective_is_dark,
+)
 
 from .test_gui import apply_and_wait, pump_until, scan_and_wait  # noqa: E402
 
@@ -179,6 +185,49 @@ def test_all_three_columns_share_body_geometry(window, library):
 
     assert len({s[0] for s in spans}) == 1, f"tops differ: {spans}"
     assert len({s[1] for s in spans}) == 1, f"bottoms differ: {spans}"
+
+
+def test_the_window_fits_a_laptop_screen(window, library):
+    """It could not be made narrower than 1458-1533 px, depending on the status
+    text: off the edge of a 1366 px screen, or 1920 px at 150% scaling."""
+    window.import_paths([library])
+    window.show()
+    window.status_label.setText("A long status message, " * 20)
+    QCoreApplication.processEvents()
+
+    assert window.minimumSizeHint().width() <= 1200
+
+
+def test_dark_theme_keeps_check_boxes_and_placeholders_visible(qapp):
+    from PySide6.QtGui import QColor, QImage, QPainter
+    from PySide6.QtWidgets import QStyle, QStyleOptionButton
+
+    apply_theme(Theme.DARK)
+    try:
+        palette = qapp.palette()
+        base = palette.color(QPalette.ColorRole.Base)
+        placeholder = palette.color(QPalette.ColorRole.PlaceholderText)
+        assert placeholder.lightness() - base.lightness() > 80
+        style = qapp.style()
+        if not isinstance(style, _OutlinedChecks):
+            assert style.name().lower() != "fusion", "Fusion was not wrapped"
+            pytest.skip("the outline is drawn only over Fusion, Qt's style on Linux")
+
+        # An unticked box on the list colour, as in the page grid.
+        image = QImage(20, 20, QImage.Format.Format_ARGB32)
+        image.fill(base)
+        option = QStyleOptionButton()
+        option.rect = image.rect().adjusted(2, 2, -2, -2)
+        option.palette = palette
+        option.state = QStyle.StateFlag.State_Enabled | QStyle.StateFlag.State_Off
+        painter = QPainter(image)
+        qapp.style().drawPrimitive(QStyle.PrimitiveElement.PE_IndicatorCheckBox, option, painter)
+        painter.end()
+
+        edge = max(QColor(image.pixel(x, 2)).lightness() for x in range(2, 18))
+        assert edge - base.lightness() > 60
+    finally:
+        apply_theme(Theme.LIGHT)
 
 
 def test_panel_chrome_is_fixed_height(window, library):

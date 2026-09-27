@@ -106,7 +106,10 @@ jobs:
             artifact: ComicCleaner-windows
           - os: macos-latest
             artifact: ComicCleaner-macos
-          - os: ubuntu-latest
+          # The binary needs the glibc it was built against or newer. 22.04's
+          # 2.35 lets it run on Ubuntu 22.04, Debian 12 and later; built on
+          # ubuntu-latest it refused to start on anything before glibc 2.38.
+          - os: ubuntu-22.04
             artifact: ComicCleaner-linux
 
     steps:

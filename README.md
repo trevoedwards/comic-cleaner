@@ -33,10 +33,13 @@ a whole library at once, without unpacking anything by hand.
 
 - **Python 3.10+** (developed on 3.12), or just grab a prebuilt binary from the
   [Releases page](https://github.com/trevoedwards/comic-cleaner/releases/latest).
+- **Linux binary:** glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and
+  later).
 - **Optional:** [7-Zip](https://www.7-zip.org/), `unrar` or WinRAR — only for
   `.cbr` / `.cb7`. Found automatically; **Settings → Archive tools** shows what
   was detected. `.cbz` needs nothing. To use a specific 7-Zip, set
-  `COMICCLEANER_7Z` to its path.
+  `COMICCLEANER_7Z` to its path. On Debian and Ubuntu, install `unrar` for
+  `.cbr`: their 7-Zip is built without RAR support.
 
 Everything else is three pip packages (PySide6, Pillow, numpy) in a
 project-local `.venv`. Nothing lands on your system Python.

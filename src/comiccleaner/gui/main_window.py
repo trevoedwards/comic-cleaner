@@ -37,6 +37,7 @@ from PySide6.QtGui import (
     QGuiApplication,
     QKeySequence,
     QMouseEvent,
+    QPainter,
     QPalette,
     QPixmap,
     QShortcut,
@@ -61,6 +62,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QProgressDialog,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QSystemTrayIcon,
@@ -331,7 +333,7 @@ class MainWindow(QMainWindow):
         self.btn_cancel.setToolTip("Stop after the book currently being processed.")
         self.btn_cancel.clicked.connect(self.cancel_work)
         self.btn_cancel.setVisible(False)
-        self.status_label = QLabel("Drop comic archives here to begin.")
+        self.status_label = _ElidedLabel("Drop comic archives here to begin.")
         self.statusBar().addWidget(self.status_label, 1)
         self.statusBar().addPermanentWidget(self.progress)
         self.statusBar().addPermanentWidget(self.btn_cancel)
@@ -584,6 +586,10 @@ class MainWindow(QMainWindow):
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
         self.archive_list.setAlternatingRowColors(True)
+        # A long row ends in "…" rather than running under a sideways scrollbar;
+        # each row's tooltip has the whole of it.
+        self.archive_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.archive_list.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.archive_list.setAccessibleName("Library")
         self.archive_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.archive_list.customContextMenuRequested.connect(self._library_menu)
@@ -610,8 +616,7 @@ class MainWindow(QMainWindow):
         self.library_search.textChanged.connect(self._apply_library_search)
 
         # Elided rather than wrapped, so the footer height never changes.
-        self.library_summary = QLabel("No archives imported.")
-        self.library_summary.setWordWrap(False)
+        self.library_summary = _ElidedLabel("No archives imported.")
 
         return self._panel(
             "Library",
@@ -748,7 +753,7 @@ class MainWindow(QMainWindow):
             for key in ("Return", "Enter"):
                 _widget_shortcut(QKeySequence(key), widget, self._open_selected_copy)
 
-        self.detail_hint = QLabel(
+        self.detail_hint = _ElidedLabel(
             "Ticked copies are removed. Double-click a page to see it full size."
         )
 
@@ -936,7 +941,7 @@ class MainWindow(QMainWindow):
         self._refresh_archive_list()
         if self._books_needing_a_tool():
             self.status_label.setText(
-                f"Still no 7-Zip, UnRAR or bsdtar found. {install_hint()}."
+                f"Still no archive tool that can read them. {install_hint()}."
             )
         elif retry:
             self.status_label.setText(
@@ -1564,6 +1569,9 @@ class MainWindow(QMainWindow):
                         item.setIcon(icon)
             finally:
                 widget.blockSignals(False)
+            # The icon re-wraps the caption, and repainting only the item's own
+            # rect left glyphs of the old layout behind ("#001 1") on a real display.
+            widget.viewport().update()
 
     # -- decisions ---------------------------------------------------------
     def _selected_groups(self) -> list[DuplicateGroup]:
@@ -2282,10 +2290,13 @@ class MainWindow(QMainWindow):
         self._refresh_archive_list()
         self.rebuild_groups()
         self._session_changed()
-        # Started once the removal thread has fully exited; see
-        # _on_removal_thread_finished. Until then a scan would be refused.
+        # Started once the removal thread has fully exited; until then a scan
+        # would be refused. The result box above is modal, and the thread
+        # usually exits while it is open, so it may have gone already.
         self._pending_rescan = rescan
         self.status_label.setText("Removal finished.")
+        if self._removal_worker is None:
+            self._start_pending_rescan()
 
     def _notify_finished(self, text: str) -> None:
         """Say a run is done when the window is not in front.
@@ -2478,8 +2489,11 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         self._job_changed()
-        # Re-hash just the books that were rewritten, so the review reflects what
-        # is on disk now without a manual rescan of the whole library.
+        self._start_pending_rescan()
+
+    def _start_pending_rescan(self) -> None:
+        """Re-hash just the books that were rewritten, so the review reflects what
+        is on disk now without a manual rescan of the whole library."""
         rescan = [p for p in self._pending_rescan if p in self.archives]
         self._pending_rescan = []
         if rescan:
@@ -3121,6 +3135,38 @@ class _ConfirmDialog(QDialog):
             self, "Plan saved", f"Wrote {path.name} and {csv_path.name}. Nothing was changed."
         )
         return path, csv_path
+
+
+class _ElidedLabel(QLabel):
+    """One line of plain text that ends in "…" when short of room, never wider.
+
+    A QLabel is at least as wide as its text, so one long status message or
+    footer made the whole window wider than a laptop screen. The full text is
+    the tooltip.
+    """
+
+    def __init__(self, text: str = "") -> None:
+        super().__init__()
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt's name
+        super().setText(text)
+        self.setToolTip(text)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt's name
+        return QSize(0, super().minimumSizeHint().height())
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        painter = QPainter(self)
+        rect = self.contentsRect()
+        shown = self.fontMetrics().elidedText(
+            self.text(), Qt.TextElideMode.ElideRight, rect.width()
+        )
+        self.style().drawItemText(
+            painter, rect, int(self.alignment()), self.palette(), self.isEnabled(),
+            shown, self.foregroundRole(),
+        )
 
 
 class _HeadingClicks(QObject):

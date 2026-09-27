@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import APP_NAME, ORGANISATION
-from ..core.extern import describe_backends
+from ..core.extern import can_extract, describe_backends, install_hint
 from ..core.grouping import EDGE_PAGES, MAX_EDGE_PAGES, MAX_THRESHOLD, GroupingOptions
 from ..core.remover import BackupPolicy
 from .theme import Theme
@@ -517,11 +517,15 @@ class SettingsDialog(QDialog):
         backends = describe_backends()
         for name, path in backends.items():
             layout.addWidget(QLabel(f"{name}: {path or 'not found'}"))
+        warning = None
         if not any(backends.values()):
             warning = QLabel(
                 "No external tool found - .cbr and .cb7 files cannot be read. "
-                "Install 7-Zip to enable them."
+                f"{install_hint()} to enable them."
             )
+        elif not can_extract("rar"):
+            warning = QLabel(f".cbr files cannot be read. {install_hint()}.")
+        if warning is not None:
             warning.setWordWrap(True)
             layout.addWidget(warning)
         return box
