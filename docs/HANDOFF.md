@@ -88,8 +88,8 @@ the tests; `gui` serves the real window to a browser over noVNC, and has
 - **Everything on `master` since 0.2.2** by tests, ruff and mypy in Docker
   and on CI, and in the real window in the `gui` container: the leave-CBR
   checkbox, linked zoom on the Green Lantern adverts, the library at the
-  1100 px minimum, and lined-up group rows. Only the `1b11dca` fixes have been
-  seen on a Windows desktop; see "Before the next release".
+  1100 px minimum, and lined-up group rows; and all of it on a Windows 11
+  desktop too (see "Before the next release").
 
 ## Next steps: 0.3, in order
 
@@ -131,11 +131,15 @@ hook. Revisit once there is feedback.
 
 ## Before the next release
 
-- **Check on Windows 11** what has only been seen on Linux: the leave-CBR
-  checkbox and its confirmation note, linked zoom with a rescaled copy, the
-  library at the window's minimum width, and the group rows. The native
-  Windows style draws lists and check boxes differently from Fusion. Use the
-  VM below, and ask the PageMaster session first.
+- **Done 2026-09-27: Windows 11 check of everything on `master`**, with the CI
+  build of `0f35309` on the VM (1280x800, 100%), by real clicks and
+  screenshots. All passed: the window opens at 1272x743 and can be narrowed to
+  1078 px with the library still readable; group rows line up; Settings lists
+  the official 7-Zip and "UnRAR: not found"; with "Leave .cbr and .cb7 books
+  unchanged" ticked, Apply's confirmation named the five Green Lantern `.cbr`
+  books, cleaned only the Batman `.cbz` ones, and left the `.cbr` files
+  byte-identical; linked zoom kept an 800x1200 reference and a 600x900 copy on
+  the same part of the page through the wheel, a drag, stepping and 1:1.
 - **Release notes**: there is no CHANGELOG; the GitHub release notes are
   generated from the commits (`--generate-notes`). The owner may want a short
   summary of what changed since 0.2.2 in the release description instead.
