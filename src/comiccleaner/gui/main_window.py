@@ -3198,10 +3198,14 @@ class _ThumbnailRows(_SelectionText):
     text started further left than a wide logo's, and no two rows lined up.
     """
 
+    def __init__(self, listing: QListWidget) -> None:
+        super().__init__(listing)
+        self._listing = listing
+
     def initStyleOption(self, option, index) -> None:  # noqa: N802 - Qt's name
         super().initStyleOption(option, index)
         if option.features & QStyleOptionViewItem.ViewItemFeature.HasDecoration:
-            option.decorationSize = self.parent().iconSize()
+            option.decorationSize = self._listing.iconSize()
 
 
 class _ElidedLabel(QLabel):

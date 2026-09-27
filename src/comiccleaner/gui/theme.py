@@ -6,7 +6,7 @@ import enum
 import logging
 import sys
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QCoreApplication, Qt
 from PySide6.QtGui import QColor, QGuiApplication, QPalette
 from PySide6.QtWidgets import QApplication, QProxyStyle, QStyle
 
@@ -136,7 +136,7 @@ class _OutlinedChecks(QProxyStyle):
         painter.restore()
 
 
-def _outline_checks_under_fusion(app: QGuiApplication) -> None:
+def _outline_checks_under_fusion(app: QCoreApplication) -> None:
     """Wrap Fusion, Qt's style on Linux, in _OutlinedChecks; native styles are left be."""
     if not isinstance(app, QApplication) or isinstance(app.style(), _OutlinedChecks):
         return

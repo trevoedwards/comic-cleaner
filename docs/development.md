@@ -13,6 +13,7 @@ cp .env.example .env                              # once; point CC_TEST_COMICS a
 docker compose build                              # again after changing pyproject.toml (--no-cache)
 docker compose run --rm dev python -m pytest      # core + offscreen GUI tests
 docker compose run --rm dev python -m ruff check .
+docker compose run --rm dev python -m mypy         # CI holds some files clean; see ci.yml
 docker compose run --rm dev bash                  # a shell
 ```
 
