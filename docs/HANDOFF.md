@@ -24,8 +24,8 @@ below): the main window and the preview open no larger than the screen (they
 were fixed at 1400x860 and 1100x820, and on 1280x800 the preview's Close
 button was under the taskbar), and a selected row takes the selection's text
 colour under the Windows styles (it was black on navy in high contrast).
-Verified on Windows 11 with the CI build of that commit. It goes out with the
-next release.
+Verified on Windows 11 with the CI build of that commit. The owner wants to keep working before the next release (2026-09-27):
+do not bump the version or push a tag until they ask.
 
 Development moved to a Linux machine and into Docker on 2026-09-27. `dev` runs
 the tests; `gui` serves the real window to a browser over noVNC (see
@@ -62,9 +62,10 @@ downloads are our own. Features beyond this wait for their feedback.
    Actions tab. Check it in a clean container:
    `docker run --rm python:3.12 pip install comiccleaner && comiccleaner --help`.
    Then give the README a `pip install comiccleaner` line.
-3. **Announce it.** Draft a short post (what it does, a screenshot from
-   `docs/`, the release link) for the owner to post: the Komga, Kavita and
-   Mylar communities, r/comicbooks. Outward-facing, so the owner posts it.
+3. **Announce it: on hold.** Drafts exist (a Reddit post, a short Discord
+   and forum post, title options, a pre-posting checklist and a 0.2.2
+   screenshot), but the owner is not announcing releases yet (2026-09-27).
+   Leave it until they say otherwise.
 4. **Close the testing gaps** in CI and the preview:
    - CI installs `unrar-free` on Ubuntu, which cannot read RAR5, so no `.cbr`
      test there exercises RAR5. Install the real `unrar` (Ubuntu multiverse).
