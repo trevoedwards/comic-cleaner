@@ -67,6 +67,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStyle,
     QStyledItemDelegate,
+    QStyleOptionViewItem,
     QSystemTrayIcon,
     QToolButton,
     QVBoxLayout,
@@ -660,7 +661,7 @@ class MainWindow(QMainWindow):
         self.btn_show_all.setVisible(False)
 
         self.group_list = QListWidget()
-        self.group_list.setItemDelegate(_SelectionText(self.group_list))
+        self.group_list.setItemDelegate(_ThumbnailRows(self.group_list))
         self.group_list.setIconSize(QSize(72, 72))
         self.group_list.setAlternatingRowColors(True)
         self.group_list.setAccessibleName("Duplicate groups")
@@ -3188,6 +3189,19 @@ class _SelectionText(QStyledItemDelegate):
         if option.state & QStyle.StateFlag.State_Selected:
             selected = option.palette.brush(QPalette.ColorRole.HighlightedText)
             option.palette.setBrush(QPalette.ColorRole.Text, selected)
+
+
+class _ThumbnailRows(_SelectionText):
+    """Rows whose thumbnails all get the list's full icon box, centred in it.
+
+    Qt sizes a row's picture to the thumbnail's own shape, so a tall page's
+    text started further left than a wide logo's, and no two rows lined up.
+    """
+
+    def initStyleOption(self, option, index) -> None:  # noqa: N802 - Qt's name
+        super().initStyleOption(option, index)
+        if option.features & QStyleOptionViewItem.ViewItemFeature.HasDecoration:
+            option.decorationSize = self.parent().iconSize()
 
 
 class _ElidedLabel(QLabel):

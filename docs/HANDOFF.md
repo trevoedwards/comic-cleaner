@@ -43,6 +43,8 @@ Linux binaries). Since 0.2.0:
 - At the window's minimum width the library column keeps 30 characters
   (about 180 px) instead of shrinking to about 75; the minimum is 1100 px on
   Linux, which still fits a 1280 px screen.
+- Group rows line up: every thumbnail gets the list's full 72 px box, so the
+  text no longer starts wherever the thumbnail's shape left it.
 - `tests/test_real_comics.py` scans and cleans the real Green Lantern Corps
   `.cbr` books from `/comics` (the test comics folder, read-only); it skips
   wherever they are not mounted, which includes CI.
@@ -166,8 +168,6 @@ finds 4 groups, 17 pages, 8.9 MB.
   comics, the app's settings and history, and screenshots. Delete it to start
   fresh. The `xdotool` driving scripts used for the checks lived there too;
   `docker compose exec gui sh -c 'DISPLAY=:1 xdotool ...'` is the pattern.
-- **Cosmetic, not fixed:** in the group list, text starts at a different
-  offset depending on the thumbnail's width.
 - **Some files have CRLF line endings** from the Windows machine. Git
   normalizes them on commit (`.gitattributes`), so the warnings are harmless.
 - **More than one tool writes here:** Cursor has rules in `.cursor/rules/` and

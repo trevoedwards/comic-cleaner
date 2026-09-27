@@ -222,6 +222,35 @@ def test_the_library_stays_readable_at_the_minimum_width(window, library):
         assert combo.width() >= combo.sizeHint().width()  # no clipped "Books affecte"
 
 
+def test_group_rows_start_their_text_at_the_same_place(window, library):
+    """A tall page's thumbnail is narrower than a wide logo's, and Qt placed each
+    row's text just after its own thumbnail, so no two rows lined up."""
+    from PySide6.QtGui import QIcon, QPixmap
+    from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
+
+    window.import_paths([library])
+    window.settings.threshold = 8
+    scan_and_wait(window)
+    lst = window.group_list
+    item = lst.item(0)
+    delegate = lst.itemDelegate()
+
+    def text_left(width: int, height: int) -> int:
+        pixmap = QPixmap(width, height)
+        pixmap.fill()
+        item.setIcon(QIcon(pixmap))
+        option = QStyleOptionViewItem()
+        option.initFrom(lst)
+        option.rect = lst.visualItemRect(item)
+        option.decorationSize = lst.iconSize()  # as the view sets it for each row
+        delegate.initStyleOption(option, lst.indexFromItem(item))
+        return lst.style().subElementRect(
+            QStyle.SubElement.SE_ItemViewItemText, option, lst
+        ).left()
+
+    assert text_left(47, 72) == text_left(72, 69) == text_left(72, 30)
+
+
 def test_windows_open_within_the_screen(window):
     """The main window opened at 1400x860 and the preview at 1100x820, whatever
     the screen: on 1280x800 the preview's Close button was under the taskbar."""
