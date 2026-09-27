@@ -206,6 +206,53 @@ def test_the_window_fits_a_laptop_screen(window, library):
     assert chars <= 190, f"minimum width {width} ({chars:.0f} chars):\n" + _widest_parts(window)
 
 
+def test_windows_open_within_the_screen(window):
+    """The main window opened at 1400x860 and the preview at 1100x820, whatever
+    the screen: on 1280x800 the preview's Close button was under the taskbar."""
+    from PySide6.QtWidgets import QWidget
+
+    from comiccleaner.gui.screen import FRAME_ALLOWANCE, fit_to_screen
+
+    room = window.screen().availableGeometry()
+    assert window.height() <= room.height() - FRAME_ALLOWANCE[1]
+
+    small = QWidget()
+    fit_to_screen(small, 300, 200)
+    assert (small.width(), small.height()) == (300, 200)
+    fit_to_screen(small, 10_000, 10_000)
+    assert small.width() <= room.width() - FRAME_ALLOWANCE[0]
+    assert small.height() <= room.height() - FRAME_ALLOWANCE[1]
+
+
+def test_a_selected_row_takes_the_selection_text_colour(window, library):
+    """Group rows carry their decision's colour, which the Windows styles kept
+    when a row was selected: black on navy in high contrast."""
+    from PySide6.QtGui import QBrush, QColor
+    from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
+
+    window.import_paths([library])
+    window.settings.threshold = 8
+    scan_and_wait(window)
+    item = window.group_list.item(0)
+    item.setForeground(QBrush(QColor(200, 0, 0)))
+    index = window.group_list.indexFromItem(item)
+    delegate = window.group_list.itemDelegate()
+
+    option = QStyleOptionViewItem()
+    option.palette = window.group_list.palette()
+    option.state = QStyle.StateFlag.State_Enabled | QStyle.StateFlag.State_Selected
+    delegate.initStyleOption(option, index)
+    assert option.palette.color(QPalette.ColorRole.Text) == option.palette.color(
+        QPalette.ColorRole.HighlightedText
+    )
+
+    option = QStyleOptionViewItem()
+    option.palette = window.group_list.palette()
+    option.state = QStyle.StateFlag.State_Enabled
+    delegate.initStyleOption(option, index)
+    assert option.palette.color(QPalette.ColorRole.Text) == QColor(200, 0, 0)
+
+
 def _widest_parts(root, depth: int = 0) -> str:
     """The visible widgets whose minimum width adds up to the window's, nested."""
     from PySide6.QtCore import Qt

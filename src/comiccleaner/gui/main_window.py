@@ -65,6 +65,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QStackedWidget,
+    QStyle,
+    QStyledItemDelegate,
     QSystemTrayIcon,
     QToolButton,
     QVBoxLayout,
@@ -132,6 +134,7 @@ from .about import AboutDialog
 from .history import HistoryDialog
 from .preview import PagePreviewDialog, page_distance
 from .remembered import RememberedDialog
+from .screen import fit_to_screen
 from .session import (
     SESSION_FILE,
     SavedDecision,
@@ -213,7 +216,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.resize(1400, 860)
+        fit_to_screen(self, 1400, 860)
         self.setAcceptDrops(True)
 
         self.settings = AppSettings.load()
@@ -590,6 +593,7 @@ class MainWindow(QMainWindow):
         # each row's tooltip has the whole of it.
         self.archive_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.archive_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.archive_list.setItemDelegate(_SelectionText(self.archive_list))
         self.archive_list.setAccessibleName("Library")
         self.archive_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.archive_list.customContextMenuRequested.connect(self._library_menu)
@@ -647,6 +651,7 @@ class MainWindow(QMainWindow):
         self.btn_show_all.setVisible(False)
 
         self.group_list = QListWidget()
+        self.group_list.setItemDelegate(_SelectionText(self.group_list))
         self.group_list.setIconSize(QSize(72, 72))
         self.group_list.setAlternatingRowColors(True)
         self.group_list.setAccessibleName("Duplicate groups")
@@ -3135,6 +3140,22 @@ class _ConfirmDialog(QDialog):
             self, "Plan saved", f"Wrote {path.name} and {csv_path.name}. Nothing was changed."
         )
         return path, csv_path
+
+
+class _SelectionText(QStyledItemDelegate):
+    """A selected row in the selection's text colour, whatever colour it has.
+
+    Rows carry their own colour (a group's decision, a book that failed to
+    read). Fusion swaps in the selection colour for a selected row, but the
+    Windows styles keep the row's, which left black text on navy in high
+    contrast and near-black on blue in the light theme.
+    """
+
+    def initStyleOption(self, option, index) -> None:  # noqa: N802 - Qt's name
+        super().initStyleOption(option, index)
+        if option.state & QStyle.StateFlag.State_Selected:
+            selected = option.palette.brush(QPalette.ColorRole.HighlightedText)
+            option.palette.setBrush(QPalette.ColorRole.Text, selected)
 
 
 class _ElidedLabel(QLabel):

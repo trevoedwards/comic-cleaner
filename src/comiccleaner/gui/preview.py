@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 
 from ..core.hashing import hamming
 from ..core.model import DuplicateGroup, MatchKind, PageEntry
+from .screen import fit_to_screen
 from .thumbs import ThumbnailCache
 
 # Pixels whose grey levels differ by less than this are JPEG noise, not a change.
@@ -267,7 +268,7 @@ class PagePreviewDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Page preview")
-        self.resize(1100, 820)
+        fit_to_screen(self, 1100, 820)
         self._group = group
         self._pages = pages
         self._index = max(0, min(start, len(pages) - 1))
