@@ -192,10 +192,35 @@ def test_the_window_fits_a_laptop_screen(window, library):
     text: off the edge of a 1366 px screen, or 1920 px at 150% scaling."""
     window.import_paths([library])
     window.show()
+    QCoreApplication.processEvents()
+    before = window.minimumSizeHint().width()
+
     window.status_label.setText("A long status message, " * 20)
     QCoreApplication.processEvents()
+    width = window.minimumSizeHint().width()
 
-    assert window.minimumSizeHint().width() <= 1200
+    assert width == before, "a long status message widened the window"
+    # About 1000 px, 169 characters, at Linux's default font. Counted in
+    # characters, since Windows' offscreen platform draws text about 1.7x wider.
+    chars = width / window.fontMetrics().averageCharWidth()
+    assert chars <= 190, f"minimum width {width} ({chars:.0f} chars):\n" + _widest_parts(window)
+
+
+def _widest_parts(root, depth: int = 0) -> str:
+    """The visible widgets whose minimum width adds up to the window's, nested."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QWidget
+
+    lines = []
+    for child in root.findChildren(QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly):
+        width = child.minimumSizeHint().width()
+        if child.isVisible() and width >= 150:
+            text = child.text() if hasattr(child, "text") and callable(child.text) else ""
+            name = child.objectName() or child.accessibleName() or str(text)[:50]
+            lines.append(f"{'  ' * depth}{type(child).__name__} {width} {name}")
+            if depth < 8:
+                lines.append(_widest_parts(child, depth + 1))
+    return "\n".join(line for line in lines if line)
 
 
 def test_dark_theme_keeps_check_boxes_and_placeholders_visible(qapp):
