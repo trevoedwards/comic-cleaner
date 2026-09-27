@@ -206,6 +206,22 @@ def test_the_window_fits_a_laptop_screen(window, library):
     assert chars <= 190, f"minimum width {width} ({chars:.0f} chars):\n" + _widest_parts(window)
 
 
+def test_the_library_stays_readable_at_the_minimum_width(window, library):
+    """At the window's minimum the library took all the squeeze, down to about
+    75 px ("Batman: ..."), while the other columns kept their width."""
+    from comiccleaner.gui.main_window import LIBRARY_MIN_CHARS
+
+    window.import_paths([library])
+    window.show()
+    window.resize(window.minimumSizeHint().width(), 700)
+    QCoreApplication.processEvents()
+
+    chars = window.fontMetrics().averageCharWidth()
+    assert window.review.widget(0).width() >= chars * LIBRARY_MIN_CHARS
+    for combo in (window.sort_combo, window.filter_combo):
+        assert combo.width() >= combo.sizeHint().width()  # no clipped "Books affecte"
+
+
 def test_windows_open_within_the_screen(window):
     """The main window opened at 1400x860 and the preview at 1100x820, whatever
     the screen: on 1280x800 the preview's Close button was under the taskbar."""

@@ -173,6 +173,8 @@ CLOSE_WAIT_MS = 4000
 # The three columns share these so their list areas start and end together.
 PANEL_HEADER_HEIGHT = 30
 PANEL_FOOTER_HEIGHT = 34
+# Minimum widths, in average characters of the window's font.
+LIBRARY_MIN_CHARS = 30
 
 SORT_MODES = [
     ("Books affected", "books"),
@@ -302,7 +304,11 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._build_library_panel())
+        library = self._build_library_panel()
+        # Without a floor of its own the library took all the squeeze at the
+        # window's minimum width, down to "Batman: ...".
+        library.setMinimumWidth(self.fontMetrics().averageCharWidth() * LIBRARY_MIN_CHARS)
+        splitter.addWidget(library)
         splitter.addWidget(self._build_groups_panel())
         splitter.addWidget(self._build_detail_panel())
         splitter.setStretchFactor(0, 0)
@@ -618,6 +624,7 @@ class MainWindow(QMainWindow):
         self.library_search.setPlaceholderText("Filter books")
         self.library_search.setClearButtonEnabled(True)
         self.library_search.setMaximumWidth(170)
+        self.library_search.setMinimumWidth(self.fontMetrics().averageCharWidth() * 10)
         self.library_search.setAccessibleName("Filter books")
         self.library_search.textChanged.connect(self._apply_library_search)
 
