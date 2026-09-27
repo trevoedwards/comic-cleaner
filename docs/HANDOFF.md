@@ -79,12 +79,11 @@ downloads are our own. Features beyond this wait for their feedback.
    screenshot), but the owner is not announcing releases yet (2026-09-27).
    Leave it until they say otherwise.
 4. **Close the testing gaps** in CI and the preview:
-   - No test extracts a real `.cbr`: there is no RAR fixture, and only RARLAB's
-     proprietary `rar` can make one. CI now has the official 7-Zip on Linux and
-     macOS, so a fixture is all that is missing. libarchive's test suite has
-     small BSD-licensed RAR4 and RAR5 archives (`test_read_format_rar*.rar.uu`)
-     that could be vendored with their notice; they hold text, not images, so
-     they test extraction rather than a scan.
+   - Done 2026-09-27: `tests/test_rar_archives.py` reads five of libarchive's
+     RAR4 and RAR5 test archives (stored, compressed, solid, Unicode names,
+     links) through every RAR reader installed, and rebuilds a solid one as a
+     CBZ. Their contents are text and binary data, not images, so a scan of a
+     real `.cbr` still has no fixture.
    - In the preview, each side zooms and pans on its own; linking them while
      comparing would keep the two copies lined up.
 5. **Optional: a Linux AppImage**, if people ask for something other than the
