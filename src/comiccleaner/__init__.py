@@ -1,6 +1,6 @@
 """Find and remove duplicate pages across comic archives."""
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 APP_NAME = "Comic Cleaner"
 AUTHOR = "Trevor Edwards"
