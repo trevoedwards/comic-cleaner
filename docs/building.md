@@ -3,12 +3,13 @@
 Back to the [README](../README.md).
 
 ```bash
-python build.py --clean --smoke-test
+docker compose run --rm dev python build.py --clean --smoke-test
 ```
 
 Options: `--onedir`, `--console`, `--cli`, `--clean`, `--smoke-test`, and `--smoke-only`
-(re-test whatever is already in `dist/` without rebuilding). It runs the same on
-Windows, macOS and Linux, and uses the project `.venv` if there is one.
+(re-test whatever is already in `dist/` without rebuilding). The Linux binary
+builds in the Docker `dev` service like the above. `build.py` itself runs the
+same on Windows and macOS, which is how CI builds those.
 
 | Platform | Output | Icon |
 |---|---|---|

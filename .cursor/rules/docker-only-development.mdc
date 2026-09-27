@@ -1,0 +1,31 @@
+---
+description: All Comic Cleaner development runs in Docker; no host toolchain installs
+alwaysApply: true
+---
+
+# Docker-only development
+
+All work on this repository must run inside Docker. Do not install project dependencies on the host (no `pip`, `venv`, `pytest`, `ruff`, or PySide6 on the host).
+
+## How to work
+
+```bash
+docker compose build
+docker compose run --rm dev bash
+docker compose run --rm dev python -m pytest
+docker compose run --rm dev python -m ruff check .
+```
+
+After changing `pyproject.toml`, rebuild:
+
+```bash
+docker compose build --no-cache
+```
+
+Test comics: `/comics` in the container (`CC_TEST_COMICS` in `.env`, currently `/home/prime/Temp/PageMaster-Test-Content`).
+
+## Do not
+
+- Create or use a host `.venv/`
+- Run `pip install` or `python -m venv` on the host
+- Document host-only setup without a Docker path

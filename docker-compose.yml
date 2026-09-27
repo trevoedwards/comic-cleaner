@@ -1,0 +1,18 @@
+services:
+  dev:
+    build: .
+    image: comic-cleaner-dev:local
+    working_dir: /workspace
+    # Run as the host user, so caches, build output and crash logs written into
+    # the bind mount stay owned by you rather than root.
+    user: "${CC_UID:-1000}:${CC_GID:-1000}"
+    volumes:
+      - .:/workspace
+      - ${CC_TEST_COMICS:-/home/prime/Temp/PageMaster-Test-Content}:/comics:ro
+    environment:
+      # No home directory exists for an arbitrary UID; pip, PyInstaller and Qt
+      # only need somewhere writable.
+      HOME: /tmp
+      QT_QPA_PLATFORM: offscreen
+    stdin_open: true
+    tty: true

@@ -45,9 +45,12 @@ project-local `.venv`. Nothing lands on your system Python.
 
 ```bash
 python -m venv .venv
-.venv/bin/python -m pip install -e ".[dev]"     # .venv\Scripts\python.exe on Windows
-python -m comiccleaner "/path/to/comics"        # paths are optional
+.venv/bin/python -m pip install .               # .venv\Scripts\python.exe on Windows
+.venv/bin/python -m comiccleaner "/path/to/comics"   # paths are optional
 ```
+
+Working on Comic Cleaner itself? Development runs in Docker instead — see
+[Development](docs/development.md).
 
 1. **Import** — drag archives or folders in, or use *Add Files* / *Add Folder*.
    A folder brings in its `.cbz`, `.zip`, `.cbr` and `.cb7` files. Plain `.rar`

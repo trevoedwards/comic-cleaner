@@ -16,6 +16,9 @@ coverage.xml
 *.sqlite-wal
 *.sqlite-shm
 
+# Local paths (test comics mount).
+.env
+
 # Crash reports from local runs.
 crashlog/
 comiccleaner-selftest.txt
