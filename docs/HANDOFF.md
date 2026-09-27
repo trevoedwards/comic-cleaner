@@ -19,13 +19,25 @@ Linux binaries). Since 0.2.0:
   screen (its minimum was about 1500 px). On Linux's Fusion style, dark-theme
   check boxes and placeholder text are visible.
 
-**On `master`, not yet released** (`1b11dca`, found by the Windows check
-below): the main window and the preview open no larger than the screen (they
-were fixed at 1400x860 and 1100x820, and on 1280x800 the preview's Close
-button was under the taskbar), and a selected row takes the selection's text
-colour under the Windows styles (it was black on navy in high contrast).
-Verified on Windows 11 with the CI build of that commit. The owner wants to keep working before the next release (2026-09-27):
-do not bump the version or push a tag until they ask.
+**On `master`, not yet released:**
+
+- `1b11dca`, found by the Windows check below: the main window and the preview
+  open no larger than the screen (they were fixed at 1400x860 and 1100x820, and
+  on 1280x800 the preview's Close button was under the taskbar), and a selected
+  row takes the selection's text colour under the Windows styles (it was black
+  on navy in high contrast). Verified on Windows 11 with the CI build.
+- **The official 7-Zip everywhere** (decided 2026-09-27). The app recommends it
+  on every platform (`7zz` from 7-zip.org on Linux and macOS) instead of
+  `unrar`: Debian's, Ubuntu's, Fedora's and Homebrew's 7-Zip are built without
+  the RAR codec, whose licence forbids using it to re-create RAR compression,
+  so they read `.cb7` but not `.cbr`. With several 7-Zips installed, the first
+  that reads RAR is used. The Settings "UnRAR" row lists only UnRAR itself.
+  The Docker image and CI install the official 26.03, pinned by digest (bump
+  `SEVENZIP_VERSION` and the digests together, in the Dockerfile and
+  `ci.yml`). UnRAR and bsdtar are still used when present.
+
+The owner wants to keep working before the next release (2026-09-27): do not
+bump the version or push a tag until they ask.
 
 Development moved to a Linux machine and into Docker on 2026-09-27. `dev` runs
 the tests; `gui` serves the real window to a browser over noVNC (see
@@ -67,14 +79,25 @@ downloads are our own. Features beyond this wait for their feedback.
    screenshot), but the owner is not announcing releases yet (2026-09-27).
    Leave it until they say otherwise.
 4. **Close the testing gaps** in CI and the preview:
-   - CI installs `unrar-free` on Ubuntu, which cannot read RAR5, so no `.cbr`
-     test there exercises RAR5. Install the real `unrar` (Ubuntu multiverse).
-     A RAR5 fixture needs the proprietary `rar` to make; decide whether to
-     commit a small one.
+   - No test extracts a real `.cbr`: there is no RAR fixture, and only RARLAB's
+     proprietary `rar` can make one. CI now has the official 7-Zip on Linux and
+     macOS, so a fixture is all that is missing. libarchive's test suite has
+     small BSD-licensed RAR4 and RAR5 archives (`test_read_format_rar*.rar.uu`)
+     that could be vendored with their notice; they hold text, not images, so
+     they test extraction rather than a scan.
    - In the preview, each side zooms and pans on its own; linking them while
      comparing would keep the two copies lined up.
 5. **Optional: a Linux AppImage**, if people ask for something other than the
    tarball.
+6. **Decide: bundle the official 7-Zip in the release binaries**, as
+   PageMaster does with its 7-Zip sidecar, so `.cbr` and `.cb7` open with
+   nothing to install. Redistribution is allowed with 7-Zip's licence text.
+   Costs: a few MB per platform (the binaries are 47-104 MB), keeping the
+   bundled copy patched (7-Zip has had real CVEs, such as CVE-2025-0411), and
+   nothing changes for a PyPI install. Decide with user feedback. Writing our
+   own RAR reader or writer was considered and rejected: CBZ is the output
+   everywhere, pages barely compress, and a new decoder of untrusted archives
+   is attack surface that libarchive and 7-Zip have spent years fuzzing.
 
 Not in 0.3 (decided 2026-09-27): code signing (macOS notarization and a
 Windows certificate cost money and need the owner's accounts), EPUB or PDF
@@ -132,8 +155,7 @@ finds 4 groups, 17 pages, 8.9 MB.
   `docker compose exec gui sh -c 'DISPLAY=:1 xdotool ...'` is the pattern.
 - **Cosmetic, not fixed:** in the group list, text starts at a different
   offset depending on the thumbnail's width. At the window's minimum width the
-  library column shrinks to about 75 px ("Batman: ..."). In Settings, the
-  UnRAR row shows `7z.exe` when there is no UnRAR, since 7-Zip reads RAR too.
+  library column shrinks to about 75 px ("Batman: ...").
 - **Some files have CRLF line endings** from the Windows machine. Git
   normalizes them on commit (`.gitattributes`), so the warnings are harmless.
 - **More than one tool writes here:** Cursor has rules in `.cursor/rules/` and

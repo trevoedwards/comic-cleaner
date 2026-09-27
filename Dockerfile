@@ -5,18 +5,27 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# unrar lives in non-free; Debian's 7z has no RAR codec, so without it no .cbr opens.
-RUN sed -i 's/^Components: main$/Components: main non-free/' /etc/apt/sources.list.d/debian.sources \
-    && apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
       libgl1 \
       libegl1 \
       libxkbcommon0 \
       libdbus-1-3 \
       libglib2.0-0 \
       libxcb1 \
-      p7zip-full \
-      unrar \
+      xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# The official 7-Zip, which reads .cbr: Debian's p7zip-full and 7zip are built
+# without the RAR codec. Pinned, and checked against the release's digest.
+ARG SEVENZIP_VERSION=26.03
+ARG SEVENZIP_SHA256=dc99eff5008f1ab79bd7084c68513701547a808a89502bf4133683535ab3c695
+RUN tag=$(echo "$SEVENZIP_VERSION" | tr -d .) \
+    && curl -fsSL -o /tmp/7z.tar.xz \
+       "https://github.com/ip7z/7zip/releases/download/$SEVENZIP_VERSION/7z$tag-linux-x64.tar.xz" \
+    && echo "$SEVENZIP_SHA256  /tmp/7z.tar.xz" | sha256sum -c - \
+    && tar -xJf /tmp/7z.tar.xz -C /usr/local/bin 7zz \
+    && rm /tmp/7z.tar.xz \
+    && 7zz i | grep -q Rar5
 
 COPY pyproject.toml README.md ./
 COPY src ./src

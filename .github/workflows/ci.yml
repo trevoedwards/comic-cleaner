@@ -14,6 +14,11 @@ concurrency:
 env:
   # The GUI tests drive a real Qt window with no display attached.
   QT_QPA_PLATFORM: offscreen
+  # The official 7-Zip, which reads .cbr; distribution and Homebrew builds leave
+  # out the RAR codec. Digests from the release page, as in the Dockerfile.
+  SEVENZIP_VERSION: "26.03"
+  SEVENZIP_SHA256_LINUX: dc99eff5008f1ab79bd7084c68513701547a808a89502bf4133683535ab3c695
+  SEVENZIP_SHA256_MAC: 5ca87677072c59f5602e5c49baa27d4694bacd2259b4e507f0094249d4281480
 
 jobs:
   test:
@@ -47,14 +52,23 @@ jobs:
             libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
             libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0
 
-      - name: Install archive tools
-        # Exercises the .cbr/.cb7 backends on the platforms that have packages.
+      - name: Install the official 7-Zip
+        # Exercises the .cbr/.cb7 backend. Windows runners have none, and read
+        # RAR through their own tar.exe (bsdtar).
+        if: runner.os != 'Windows'
         run: |
+          tag=$(echo "$SEVENZIP_VERSION" | tr -d .)
           if [ "$RUNNER_OS" = "Linux" ]; then
-            sudo apt-get install -y --no-install-recommends p7zip-full unrar-free || true
-          elif [ "$RUNNER_OS" = "macOS" ]; then
-            brew install p7zip || true
+            file="7z$tag-linux-x64.tar.xz"; sum="$SEVENZIP_SHA256_LINUX"
+          else
+            file="7z$tag-mac.tar.xz"; sum="$SEVENZIP_SHA256_MAC"
           fi
+          curl -fsSL -o "$RUNNER_TEMP/7z.tar.xz" \
+            "https://github.com/ip7z/7zip/releases/download/$SEVENZIP_VERSION/$file"
+          echo "$sum  $RUNNER_TEMP/7z.tar.xz" | shasum -a 256 -c -
+          tar -xJf "$RUNNER_TEMP/7z.tar.xz" -C "$RUNNER_TEMP" 7zz
+          sudo install -m 755 "$RUNNER_TEMP/7zz" /usr/local/bin/7zz
+          7zz i | grep -q Rar5
         shell: bash
 
       - name: Install the project

@@ -3,9 +3,10 @@
 Back to the [README](../README.md).
 
 All development runs in Docker; nothing is installed on the host. The `dev`
-service has Python 3.12, the `dev` and `build` extras, 7-Zip, and the libraries
-Qt needs to run offscreen. The repository is bind-mounted at `/workspace`, so
-edits on the host are live in the container without a rebuild.
+service has Python 3.12, the `dev` and `build` extras, the official 7-Zip
+(`7zz`, pinned in the Dockerfile), and the libraries Qt needs to run offscreen.
+The repository is bind-mounted at `/workspace`, so edits on the host are live in
+the container without a rebuild.
 
 ```bash
 cp .env.example .env                              # once; point CC_TEST_COMICS at some comics

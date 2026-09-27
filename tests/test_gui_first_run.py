@@ -211,7 +211,8 @@ def test_can_extract_matches_what_each_tool_reads(
 
 def test_refresh_backends_forgets_what_was_found(monkeypatch):
     calls: list[str] = []
-    monkeypatch.setattr(extern, "_first_existing", lambda names, c: calls.append("x") or None)
+    monkeypatch.setattr(extern, "_override", lambda: None)
+    monkeypatch.setattr(extern, "_all_existing", lambda names, c: calls.append("x") or [])
     extern.refresh_backends()
 
     extern.sevenzip_path()
@@ -252,43 +253,91 @@ _WITH_RAR = _P7ZIP_FULL + """ 0  D    40301   Rar1
     [(_P7ZIP_FULL, False), (_WITH_RAR, True), ("7-Zip 9.20, no listing\n", True)],
 )
 def test_sevenzip_reads_rar_goes_by_the_codecs(monkeypatch, listing, reads):
-    monkeypatch.setattr(extern, "sevenzip_path", lambda: "/usr/bin/7z")
     monkeypatch.setattr(
         extern, "_run",
         lambda cmd, timeout=600: subprocess.CompletedProcess(cmd, 0, listing.encode(), b""),
     )
-    extern.sevenzip_reads_rar.cache_clear()
+    extern._reads_rar.cache_clear()
     try:
-        assert extern.sevenzip_reads_rar() is reads
+        assert extern._reads_rar("/usr/bin/7z") is reads
     finally:
-        extern.sevenzip_reads_rar.cache_clear()
+        extern._reads_rar.cache_clear()
 
 
 def test_sevenzip_that_cannot_list_is_trusted(monkeypatch):
     def fail(cmd, timeout=600):
         raise OSError("gone")
 
-    monkeypatch.setattr(extern, "sevenzip_path", lambda: "/usr/bin/7z")
     monkeypatch.setattr(extern, "_run", fail)
-    extern.sevenzip_reads_rar.cache_clear()
+    extern._reads_rar.cache_clear()
     try:
-        assert extern.sevenzip_reads_rar() is True
+        assert extern._reads_rar("/usr/bin/7z") is True
     finally:
-        extern.sevenzip_reads_rar.cache_clear()
+        extern._reads_rar.cache_clear()
 
 
-def test_linux_hint_asks_for_unrar_when_7zip_lacks_rar(monkeypatch):
-    monkeypatch.setattr(extern.sys, "platform", "linux")
+@pytest.mark.parametrize(
+    ("found", "chosen"),
+    [
+        # A distribution's 7z first on PATH, the official 7zz after it.
+        (["/usr/bin/7z", "/usr/local/bin/7zz"], "/usr/local/bin/7zz"),
+        # Nothing reads RAR: the first found still reads .cb7.
+        (["/usr/bin/7z", "/usr/bin/7za"], "/usr/bin/7z"),
+        ([], None),
+    ],
+)
+def test_the_7zip_that_reads_rar_is_preferred(monkeypatch, found, chosen):
+    monkeypatch.setattr(extern, "_override", lambda: None)
+    monkeypatch.setattr(extern, "_all_existing", lambda names, candidates: list(found))
+    monkeypatch.setattr(extern, "_reads_rar", lambda path: path.endswith("7zz"))
+    extern.sevenzip_path.cache_clear()
+    try:
+        assert extern.sevenzip_path() == chosen
+    finally:
+        extern.sevenzip_path.cache_clear()
+
+
+def test_the_override_wins_even_without_rar(monkeypatch, tmp_path):
+    mine = tmp_path / "7z"
+    mine.write_bytes(b"")
+    monkeypatch.setenv("COMICCLEANER_7Z", str(mine))
+    monkeypatch.setattr(extern, "_all_existing", lambda names, c: ["/usr/local/bin/7zz"])
+    monkeypatch.setattr(extern, "_reads_rar", lambda path: path.endswith("7zz"))
+    extern.sevenzip_path.cache_clear()
+    try:
+        assert extern.sevenzip_path() == str(mine)
+    finally:
+        extern.sevenzip_path.cache_clear()
+
+
+def test_the_unrar_row_names_only_unrar(monkeypatch):
+    """unrar_path falls back to 7-Zip, which then showed up as "UnRAR: ...7z.exe"."""
+    monkeypatch.setattr(extern, "sevenzip_path", lambda: r"C:\7zip\7z.exe")
+    monkeypatch.setattr(extern, "bsdtar_path", lambda: None)
+    monkeypatch.setattr(extern, "unrar_path", lambda: r"C:\7zip\7z.exe")
+    assert extern.describe_backends()["UnRAR"] is None
+
+    monkeypatch.setattr(extern, "unrar_path", lambda: "/usr/bin/unrar")
+    assert extern.describe_backends()["UnRAR"] == "/usr/bin/unrar"
+
+
+@pytest.mark.parametrize(("platform", "system"), [("linux", "Linux"), ("darwin", "macOS")])
+def test_hint_asks_for_the_official_7zip_when_the_one_found_lacks_rar(
+    monkeypatch, platform, system
+):
+    """Debian's, Ubuntu's and Homebrew's 7-Zip read .cb7 but no compressed .cbr."""
+    monkeypatch.setattr(extern.sys, "platform", platform)
     monkeypatch.setattr(extern, "sevenzip_path", lambda: "/usr/bin/7z")
     monkeypatch.setattr(extern, "sevenzip_reads_rar", lambda: False)
 
     hint = extern.install_hint()
-    assert hint.startswith("Install unrar")
+    assert hint.startswith(f"Install the official 7-Zip for {system}, 7zz from 7-zip.org")
     assert "without RAR support" in hint
+    assert "unrar" not in hint.lower()
 
 
-def test_a_rar_that_7zip_cannot_read_says_to_install_unrar(monkeypatch, tmp_path):
-    """Debian's 7-Zip fails a .cbr with nothing on stderr: 'Tried: 7z exited 2: '."""
+def test_a_rar_that_7zip_cannot_read_says_to_get_the_official_7zip(monkeypatch, tmp_path):
+    """Debian's 7-Zip fails a .cbr with nothing on stderr: 'Tried: 7z exited 2'."""
     monkeypatch.setattr(extern.sys, "platform", "linux")
     monkeypatch.setattr(extern, "sevenzip_path", lambda: "/usr/bin/7z")
     monkeypatch.setattr(extern, "unrar_path", lambda: "/usr/bin/7z")
@@ -302,7 +351,7 @@ def test_a_rar_that_7zip_cannot_read_says_to_install_unrar(monkeypatch, tmp_path
         extern.extract_all(tmp_path / "Book.cbr", tmp_path / "out", kind="rar")
 
     assert "7z exited 2" in str(caught.value)
-    assert "Install unrar" in str(caught.value)
+    assert "official 7-Zip for Linux" in str(caught.value)
 
 
 def test_no_tool_at_all_gives_the_platform_hint(monkeypatch, tmp_path):

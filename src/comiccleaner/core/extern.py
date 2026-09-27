@@ -1,7 +1,10 @@
 """Locating and driving external archive tools (7-Zip, UnRAR, bsdtar).
 
-We shell out instead of taking a pip dependency, because every Windows box that
-has 7-Zip or WinRAR installed already has a working RAR/7z extractor.
+We shell out instead of taking a pip dependency. The official 7-Zip, from
+7-zip.org, reads both .cbr and .cb7 on every platform, so it is the one tool to
+recommend. Debian, Ubuntu, Fedora and Homebrew build 7-Zip without its RAR
+codec, whose licence forbids using it to re-create RAR compression, so theirs
+reads .cb7 but not .cbr. UnRAR and bsdtar are still used when they are there.
 """
 
 from __future__ import annotations
@@ -24,11 +27,16 @@ _QUIET_LAUNCH: dict[str, int] = (
     {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 )
 
+# The official build is 7zz on Linux and macOS; distributions call theirs 7z.
+_SEVENZIP_NAMES = ["7zz", "7z", "7za"]
+
 _SEVENZIP_CANDIDATES = [
     r"C:\Program Files\7-Zip\7z.exe",
     r"C:\Program Files (x86)\7-Zip\7z.exe",
-    "/usr/bin/7z",
+    "/usr/local/bin/7zz",
     "/usr/bin/7zz",
+    "/opt/homebrew/bin/7zz",
+    "/usr/bin/7z",
     "/usr/local/bin/7z",
     "/opt/homebrew/bin/7z",
 ]
@@ -42,27 +50,47 @@ _UNRAR_CANDIDATES = [
 ]
 
 
-def _first_existing(names: list[str], candidates: list[str]) -> str | None:
-    """Prefer something on PATH, then fall back to well-known install locations."""
+def _override() -> str | None:
     # COMICDEDUPE_7Z is the name from before the project was renamed.
     for variable in ("COMICCLEANER_7Z", "COMICDEDUPE_7Z"):
         env_override = os.environ.get(variable)
         if env_override and Path(env_override).exists():
             return env_override
-    for name in names:
-        found = shutil.which(name)
-        if found:
-            return found
-    for path in candidates:
-        if Path(path).exists():
-            return path
     return None
+
+
+def _all_existing(names: list[str], candidates: list[str]) -> list[str]:
+    """Everything found, on PATH first and then in well-known install locations."""
+    found: list[str] = []
+    for name in names:
+        hit = shutil.which(name)
+        if hit and hit not in found:
+            found.append(hit)
+    for path in candidates:
+        if Path(path).exists() and path not in found:
+            found.append(path)
+    return found
+
+
+def _first_existing(names: list[str], candidates: list[str]) -> str | None:
+    """Prefer something on PATH, then fall back to well-known install locations."""
+    found = _all_existing(names, candidates)
+    return _override() or (found[0] if found else None)
 
 
 @functools.lru_cache(maxsize=1)
 def sevenzip_path() -> str | None:
-    """Path to a 7-Zip binary, or None. 7-Zip reads .7z AND .rar."""
-    return _first_existing(["7z", "7zz", "7za"], _SEVENZIP_CANDIDATES)
+    """Path to a 7-Zip binary, or None.
+
+    With several installed (a distribution's 7z beside the official 7zz, say),
+    the first that can read RAR wins, since only that one reads every .cbr.
+    COMICCLEANER_7Z always wins.
+    """
+    override = _override()
+    if override:
+        return override
+    found = _all_existing(_SEVENZIP_NAMES, _SEVENZIP_CANDIDATES)
+    return next((path for path in found if _reads_rar(path)), found[0] if found else None)
 
 
 @functools.lru_cache(maxsize=1)
@@ -77,23 +105,26 @@ def _is_unrar(path: str | None) -> bool:
     return path is not None and ntpath.basename(path).lower().startswith("unrar")
 
 
-@functools.lru_cache(maxsize=1)
-def sevenzip_reads_rar() -> bool:
-    """Whether the 7-Zip found can unpack RAR, going by the codecs `7z i` lists.
+@functools.cache
+def _reads_rar(sevenz: str) -> bool:
+    """Whether this 7-Zip can unpack RAR, going by the codecs `7z i` lists.
 
-    Debian and Ubuntu build 7-Zip without the RAR codec (it lives in non-free),
-    so there it reads .cb7 but fails on every .cbr. When the listing cannot be
-    read, 7-Zip is given the benefit of the doubt, as it was before this check.
+    A build without the RAR codec still lists RAR among its formats, and fails
+    on every compressed .cbr. When the listing cannot be read, 7-Zip is given
+    the benefit of the doubt.
     """
-    sevenz = sevenzip_path()
-    if sevenz is None:
-        return False
     try:
         listing = _run([sevenz, "i"], timeout=10).stdout.decode("utf-8", "replace")
     except (OSError, subprocess.SubprocessError):
         return True
     _, found, codecs = listing.partition("Codecs:")
     return not found or "rar" in codecs.lower()
+
+
+def sevenzip_reads_rar() -> bool:
+    """Whether the 7-Zip in use can unpack RAR."""
+    sevenz = sevenzip_path()
+    return sevenz is not None and _reads_rar(sevenz)
 
 
 @functools.lru_cache(maxsize=1)
@@ -126,7 +157,8 @@ def describe_backends() -> dict[str, str | None]:
     """For the settings dialog / diagnostics."""
     return {
         "7-Zip": sevenzip_path(),
-        "UnRAR": unrar_path(),
+        # Only UnRAR itself: 7-Zip, which unrar_path falls back to, has its own row.
+        "UnRAR": unrar if _is_unrar(unrar := unrar_path()) else None,
         "bsdtar": bsdtar_path(),
     }
 
@@ -142,7 +174,7 @@ def can_extract(kind: str) -> bool:
 
 def refresh_backends() -> None:
     """Forget what was detected, so a tool installed since launch is found."""
-    for finder in (sevenzip_path, unrar_path, bsdtar_path, sevenzip_reads_rar):
+    for finder in (sevenzip_path, unrar_path, bsdtar_path, _reads_rar):
         finder.cache_clear()
 
 
@@ -150,17 +182,21 @@ SEVENZIP_URL = "https://www.7-zip.org/"
 
 
 def install_hint() -> str:
-    """How to get a RAR/7z reader on this platform, as a clause to end a sentence."""
+    """How to get a RAR/7z reader on this platform, as a clause to end a sentence.
+
+    Always the official 7-Zip: it reads .cbr and .cb7 everywhere. Homebrew's
+    sevenzip is built without RAR decompression, so on a Mac it is not enough.
+    """
     if sys.platform == "win32":
-        return "Install 7-Zip (free, from 7-zip.org) or WinRAR"
-    if sys.platform == "darwin":
-        return "Install 7-Zip with Homebrew (brew install sevenzip)"
+        return "Install 7-Zip (free, from 7-zip.org)"
+    system = "macOS" if sys.platform == "darwin" else "Linux"
     if sevenzip_path() is not None and not sevenzip_reads_rar():
         return (
-            "Install unrar from your package manager (the 7-Zip here was built "
-            "without RAR support, as Debian and Ubuntu build it)"
+            f"Install the official 7-Zip for {system}, 7zz from 7-zip.org (the 7-Zip "
+            "found here was built without RAR support, as Debian, Ubuntu and "
+            "Homebrew build it)"
         )
-    return "Install unrar and 7-Zip from your package manager (the unrar and 7zip packages)"
+    return f"Install the official 7-Zip for {system}, 7zz from 7-zip.org"
 
 
 def _run(cmd: list[str], *, timeout: int = 600) -> subprocess.CompletedProcess[bytes]:

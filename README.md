@@ -35,11 +35,14 @@ a whole library at once, without unpacking anything by hand.
   [Releases page](https://github.com/trevoedwards/comic-cleaner/releases/latest).
 - **Linux binary:** glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and
   later).
-- **Optional:** [7-Zip](https://www.7-zip.org/), `unrar` or WinRAR — only for
-  `.cbr` / `.cb7`. Found automatically; **Settings → Archive tools** shows what
-  was detected. `.cbz` needs nothing. To use a specific 7-Zip, set
-  `COMICCLEANER_7Z` to its path. On Debian and Ubuntu, install `unrar` for
-  `.cbr`: their 7-Zip is built without RAR support.
+- **Optional:** the official [7-Zip](https://www.7-zip.org/), only for `.cbr` /
+  `.cb7`; `.cbz` needs nothing. On Linux and macOS that is `7zz` from 7-zip.org:
+  the 7-Zip that Debian, Ubuntu, Fedora and Homebrew ship is built without RAR
+  support, so it reads `.cb7` but not `.cbr`. Found automatically, and
+  **Settings → Archive tools** shows what was detected. To use a specific
+  7-Zip, set `COMICCLEANER_7Z` to its path. `unrar`, WinRAR and `bsdtar` are
+  used too when present; Windows 10 and 11 read `.cbr` through their own
+  `tar.exe` even without 7-Zip.
 
 Everything else is three pip packages (PySide6, Pillow, numpy) in a
 project-local `.venv`. Nothing lands on your system Python.
