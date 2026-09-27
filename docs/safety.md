@@ -20,6 +20,8 @@ Removal is the only destructive operation, and it is deliberately paranoid:
   is often a cover. **Save Plan…** writes it all to JSON and CSV first if you
   want a record (`clean --plan FILE` on the command line).
 - Books in a protected folder (Settings) are never rewritten.
+- With **Leave .cbr and .cb7 books unchanged** (`--leave-cbr`), neither are
+  those.
 - With **Copy removed pages to** set (`--quarantine`), every removed page is
   copied out before its book is replaced, and a book whose pages cannot be
   copied is not touched.

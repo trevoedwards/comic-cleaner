@@ -36,6 +36,14 @@ Linux binaries). Since 0.2.0:
   `SEVENZIP_VERSION` and the digests together, in the Dockerfile and
   `ci.yml`). UnRAR and bsdtar are still used when present.
 
+- **Leave .cbr and .cb7 books unchanged** (Settings → Removing, `--leave-cbr`):
+  those books are scanned and reviewed but never rewritten or converted; a zip
+  named `.cbr` counts too. Apply and `clean` list them, plan files give the
+  reason, and `--json` has `left_unchanged`. The README gained "Why CBZ?".
+- `tests/test_real_comics.py` scans and cleans the real Green Lantern Corps
+  `.cbr` books from `/comics` (the test comics folder, read-only); it skips
+  wherever they are not mounted, which includes CI.
+
 The owner wants to keep working before the next release (2026-09-27): do not
 bump the version or push a tag until they ask.
 

@@ -139,6 +139,24 @@ PDF is not supported, and neither `.cbr` nor `.cb7` can be written: cleaning one
 writes a `.cbz` beside it and keeps the original as the backup. See
 [Reviewing groups](docs/review.md) and [Settings](docs/settings.md) for the rest.
 
+### Why CBZ?
+
+A cleaned `.cbr` or `.cb7` comes back as a `.cbz`. RAR is a proprietary format:
+only RARLAB's own software can write it, so no open tool can put a RAR archive
+back together after taking a page out. Komga works the same way; it removes
+duplicate pages only from CBZ books, and converts CBR to CBZ first.
+
+Nothing is lost in the move. A CBZ is a plain ZIP of the same images, which are
+already compressed, so a RAR is barely any smaller. Every reader and server
+opens CBZ, can jump straight to any page (a solid RAR has to be unpacked from
+the start), and tools like Komga and ComicTagger can edit it.
+
+Keeping your originals exactly as they are, to go on seeding them or to match a
+release, is a different matter: any edit changes the file, whatever its format.
+For that, **Write cleaned copies to** (`--output`) leaves the originals alone, and
+**Leave .cbr and .cb7 books unchanged** (Settings → Removing, `--leave-cbr`) still
+scans and reviews those books but never rewrites them.
+
 ### After a library import (Komga, Kavita, ComicRack)
 
 There is no server integration. Instead, run the command line from whatever

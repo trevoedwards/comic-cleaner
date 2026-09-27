@@ -29,6 +29,10 @@ happens; with `--dry-run` nothing else is written. `--quarantine DIR` copies eac
 removed page into `DIR/<book name>/` before the book is replaced; a book whose
 pages cannot be copied is left untouched and reported as failed.
 
+`--leave-cbr` leaves `.cbr` and `.cb7` books unchanged: they are scanned and
+their matches listed, but none is rewritten or rebuilt as a `.cbz`. The plan
+file lists them as skipped, and `--json` as `left_unchanged`.
+
 `--exclude GLOB` (repeatable, on `scan` and `clean`) leaves out files whose name,
 or path relative to a folder you named, matches: `--exclude '*sample*'
 --exclude 'Scans/*'`. `--edge-window N` (default 3, at most 10) sets how close

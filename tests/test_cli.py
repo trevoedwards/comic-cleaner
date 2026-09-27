@@ -16,6 +16,7 @@ from comiccleaner import cli
 from comiccleaner.core.archive import is_page_name
 from comiccleaner.core.cache import HashCache
 from comiccleaner.core.grouping import GroupingOptions, build_groups
+from comiccleaner.core.planfile import SKIPPED_CBR
 from comiccleaner.core.scanner import find_archives, scan_archives
 
 from .conftest import make_page, write_archive
@@ -705,3 +706,62 @@ def test_a_bad_pack_is_refused(tmp_path):
     code, _, err = run("pack", "--cache", str(tmp_path / "c.sqlite"), "import", str(pack))
     assert code == cli.EXIT_REFUSED
     assert "Nothing was imported" in err
+
+
+# -- --leave-cbr -----------------------------------------------------------
+
+
+def _with_a_cbr(root: Path, cbr_books: tuple[int, ...] = (3,)) -> Path:
+    """Three books sharing an advert; those numbered in `cbr_books` named .cbr."""
+    ad = make_page(seed=9999)
+    for number in (1, 2, 3):
+        story = [make_page(seed=number * 100 + i) for i in range(4)]
+        suffix = ".cbr" if number in cbr_books else ".cbz"
+        write_archive(root / f"Book {number:02d}{suffix}", [story[0], ad, *story[1:]])
+    return root
+
+
+def test_clean_leave_cbr_reports_cbr_books_and_leaves_them_alone(tmp_path, cache_file):
+    library = _with_a_cbr(tmp_path / "lib")
+    cbr = library / "Book 03.cbr"
+    before = cbr.read_bytes()
+    plan = tmp_path / "plan.json"
+
+    code, out, _ = run(
+        "clean", str(library), "--all", "--yes", "--leave-cbr",
+        "--cache", cache_file, "--plan", str(plan),
+    )
+
+    assert code == cli.EXIT_OK
+    assert "Leaving 1 .cbr/.cb7 book(s) unchanged (--leave-cbr)" in out
+    assert cbr.read_bytes() == before
+    assert not (library / "Book 03.cbz").exists()
+    assert _pages(library / "Book 01.cbz") == _pages(library / "Book 02.cbz") == 4
+    books = json.loads(plan.read_text())["books"]
+    skipped = {Path(b["archive"]).name: b["reason"] for b in books if b["status"] == "skipped"}
+    assert skipped == {"Book 03.cbr": SKIPPED_CBR}
+
+
+def test_clean_leave_cbr_lists_them_in_json(tmp_path, cache_file):
+    library = _with_a_cbr(tmp_path / "lib")
+    code, out, _ = run(
+        "clean", str(library), "--all", "--dry-run", "--leave-cbr",
+        "--cache", cache_file, "--json",
+    )
+    assert code == cli.EXIT_OK
+    assert [Path(p).name for p in json.loads(out)["left_unchanged"]] == ["Book 03.cbr"]
+
+
+def test_clean_leave_cbr_with_only_cbr_books_affected(tmp_path, cache_file):
+    library = _with_a_cbr(tmp_path / "lib", cbr_books=(1, 2, 3))
+    before = {p.name: p.read_bytes() for p in library.iterdir()}
+
+    code, out, _ = run(
+        "clean", str(library), "--all", "--yes", "--leave-cbr", "--cache", cache_file
+    )
+
+    assert code == cli.EXIT_OK
+    assert "Leaving 3 .cbr/.cb7 book(s) unchanged" in out
+    assert "Nothing to remove." in out
+    assert {p.name: p.read_bytes() for p in library.iterdir()} == before
+

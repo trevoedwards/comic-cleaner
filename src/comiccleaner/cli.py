@@ -43,6 +43,7 @@ from .core.history import load_history, record_run, restore, when
 from .core.model import ArchiveInfo, Decision, DuplicateGroup, MatchKind
 from .core.pack import export_pack, import_pack, read_pack
 from .core.planfile import (
+    SKIPPED_CBR,
     SKIPPED_OVER_LIMIT,
     describe_plan,
     plan_records,
@@ -57,6 +58,7 @@ from .core.remover import (
     build_plans,
     recover_interrupted,
     split_by_fraction,
+    split_cbr,
 )
 from .core.scanner import scan_archives, survey
 from .core.signatures import (
@@ -236,6 +238,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Report what would happen and change nothing.")
     safety.add_argument("-y", "--yes", action="store_true",
                         help="Do not ask for confirmation. Required when not run from a terminal.")
+    safety.add_argument(
+        "--leave-cbr", action="store_true",
+        help="Leave .cbr and .cb7 books unchanged: report their pages, but never "
+        "rewrite them or rebuild them as .cbz.",
+    )
     safety.add_argument(
         "--edges", type=int, metavar="N",
         help="Only remove copies within N pages of the start or end of a book, where "
@@ -659,18 +666,32 @@ def _dump_clean(
     deleted: tuple[int, int] | None = None,
     remembered: int = 0,
     spared: int = 0,
+    unchanged: list[RemovalPlan] | None = None,
 ) -> None:
     payload = {
         "version": JSON_VERSION,
         "dry_run": args.dry_run,
         "library": _library_json(archives),
         **_result_json(report, skipped),
+        "left_unchanged": [str(p.archive) for p in unchanged or []],
         "backups_deleted": deleted[0] if deleted else 0,
         "remembered": remembered,
         "spared_mid_book": spared,
     }
     json.dump(payload, out, indent=2)
     out.write("\n")
+
+
+def _print_unchanged(unchanged: list[RemovalPlan], out: TextIO, root: Path | None) -> None:
+    pages = sum(len(p.remove_names) for p in unchanged)
+    print(
+        f"Leaving {len(unchanged)} .cbr/.cb7 book(s) unchanged (--leave-cbr), "
+        f"with {pages} matched page(s) still in them:",
+        file=out,
+    )
+    for plan in unchanged:
+        print(f"  {_display(plan.archive, root)}", file=out)
+    print(file=out)
 
 
 def _print_plans(plans: list[RemovalPlan], skipped: list[RemovalPlan],
@@ -796,13 +817,19 @@ def _run_clean(
                 if not near_edge(page, counts.get(page.archive, 0), args.edges):
                     group.kept.add(page.key)
                     spared += 1
-    plans, skipped = split_by_fraction(build_plans(chosen, counts), args.max_fraction)
+    plans = build_plans(chosen, counts)
+    unchanged: list[RemovalPlan] = []
+    if args.leave_cbr:
+        plans, unchanged = split_cbr(plans)
+    plans, skipped = split_by_fraction(plans, args.max_fraction)
 
     human = err if args.json else out  # keep stdout pure JSON
     root = _display_root(archives)
     if args.plan is not None:
         records = plan_records(
-            plans, [(p, SKIPPED_OVER_LIMIT) for p in skipped], dry_run=args.dry_run
+            plans,
+            [(p, SKIPPED_OVER_LIMIT) for p in skipped] + [(p, SKIPPED_CBR) for p in unchanged],
+            dry_run=args.dry_run,
         )
         try:
             write_plan_json(args.plan, records, dry_run=args.dry_run)
@@ -820,9 +847,13 @@ def _run_clean(
                 file=human,
             )
             print(file=human)
+        if unchanged:
+            _print_unchanged(unchanged, human, root)
     if not plans:
         if args.json:
-            _dump_clean(out, args, archives, RemovalReport(), skipped, spared=spared)
+            _dump_clean(
+                out, args, archives, RemovalReport(), skipped, spared=spared, unchanged=unchanged
+            )
         else:
             print("Nothing to remove.", file=out)
             if skipped:
@@ -872,7 +903,9 @@ def _run_clean(
         deleted = _delete_backups(report)
 
     if args.json:
-        _dump_clean(out, args, archives, report, skipped, deleted, remembered, spared)
+        _dump_clean(
+            out, args, archives, report, skipped, deleted, remembered, spared, unchanged
+        )
     else:
         _print_report(report, args.dry_run, out, root)
         if deleted is not None:

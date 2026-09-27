@@ -23,6 +23,7 @@ CSV_COLUMNS = [
 # Why a book is in the plan file but will not be touched.
 SKIPPED_OVER_LIMIT = "would lose too large a share of its pages"
 SKIPPED_PROTECTED = "in a protected folder"
+SKIPPED_CBR = "a .cbr or .cb7, left unchanged"
 
 
 def describe_plan(plan: RemovalPlan, names: int = 3) -> str:

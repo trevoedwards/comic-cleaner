@@ -200,6 +200,27 @@ def build_plans(
     return plans
 
 
+# Named as formats a clean cannot write back. A zip in disguise is one of them
+# too: it would be rewritten in place, and still under its .cbr name.
+_CBR_SUFFIXES = frozenset({".cbr", ".cb7", ".rar", ".7z"})
+
+
+def split_cbr(plans: Iterable[RemovalPlan]) -> tuple[list[RemovalPlan], list[RemovalPlan]]:
+    """Plans for other books, and for the .cbr and .cb7 books left unchanged.
+
+    For "Leave .cbr/.cb7 books unchanged" (--leave-cbr): those books are
+    scanned, reviewed and reported like any other, but never rewritten, so none
+    is rebuilt as a .cbz. That covers every book a clean would convert, and a
+    zip named .cbr, which would otherwise change under its .cbr name.
+    """
+    allowed: list[RemovalPlan] = []
+    unchanged: list[RemovalPlan] = []
+    for plan in plans:
+        leave = plan.converts or plan.archive.suffix.lower() in _CBR_SUFFIXES
+        (unchanged if leave else allowed).append(plan)
+    return allowed, unchanged
+
+
 def split_protected(
     plans: Iterable[RemovalPlan], folders: Iterable[Path | str]
 ) -> tuple[list[RemovalPlan], list[RemovalPlan]]:

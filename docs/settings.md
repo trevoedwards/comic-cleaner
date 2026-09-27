@@ -18,6 +18,7 @@ Back to the [README](../README.md).
 | **Delete backups after a run** | off | Sweeps `.bak` files once every archive in the run has succeeded. |
 | **Remember removed pages** | on | Keeps known junk, and marks it for removal in new books. |
 | **Write cleaned copies to** | *(in place)* | Point at a folder to leave originals untouched. Books keep their folder layout underneath it, and an existing file is never overwritten. |
+| **Leave .cbr and .cb7 books unchanged** | off | Those books are scanned and reviewed, and Apply lists their matches, but they are never rewritten, so none is rebuilt as a `.cbz`. A zip named `.cbr` counts too. `--leave-cbr` on the command line. See [Why CBZ?](../README.md#why-cbz). |
 | **Copy removed pages to** | *(none)* | Each removed page is copied into this folder, under its book's name, before the book is replaced. If the copy fails, that book is left untouched. |
 | **Skip files matching** | *(none)* | Glob patterns, one per line, matched against a file's name and its path inside the folder being added (`*sample*`, `Scans/*`). Matching files are not imported. |
 | **Never change books in** | *(none)* | Folders, one per line. Their books are imported and reviewed as usual but never rewritten; Apply lists them as left out. |

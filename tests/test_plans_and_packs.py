@@ -364,3 +364,34 @@ def test_only_settings_that_differ_are_offered():
     proposed = {"threshold": 6, "min_archives": 2}
     assert setting_changes(current, proposed) == [("threshold", 0, 6)]
     assert setting_changes(current, None) == []
+
+
+# -- leaving .cbr and .cb7 books unchanged -----------------------------------
+
+
+def test_split_cbr_goes_by_name_and_by_what_a_clean_would_convert(tmp_path):
+    from comiccleaner.core.remover import RemovalPlan, split_cbr
+
+    rar = (Path(__file__).parent / "data" / "rar" / "test_read_format_rar5_stored.rar")
+    zip_bytes = (tmp_path / "zip.cbz")
+    write_archive(zip_bytes, [make_page(seed=1)])
+    books = {
+        "plain.cbz": zip_bytes.read_bytes(),
+        "archive.zip": zip_bytes.read_bytes(),
+        "zip named.cbr": zip_bytes.read_bytes(),  # rewritten in place otherwise
+        "real.cbr": rar.read_bytes(),
+        "rar named.cbz": rar.read_bytes(),  # a clean would convert it
+        "seven.cb7": b"7z\xbc\xaf\x27\x1c" + b"\0" * 32,
+    }
+    plans = []
+    for name, data in books.items():
+        (tmp_path / name).write_bytes(data)
+        plans.append(RemovalPlan(tmp_path / name, {"x.jpg"}, 3))
+
+    allowed, unchanged = split_cbr(plans)
+
+    assert sorted(p.archive.name for p in allowed) == ["archive.zip", "plain.cbz"]
+    assert sorted(p.archive.name for p in unchanged) == [
+        "rar named.cbz", "real.cbr", "seven.cb7", "zip named.cbr",
+    ]
+

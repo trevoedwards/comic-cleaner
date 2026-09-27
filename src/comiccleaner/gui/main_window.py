@@ -106,6 +106,7 @@ from ..core.model import (
 )
 from ..core.pack import SETTING_LIMITS, export_pack, import_pack, read_pack, setting_changes
 from ..core.planfile import (
+    SKIPPED_CBR,
     SKIPPED_OVER_LIMIT,
     SKIPPED_PROTECTED,
     describe_plan,
@@ -122,6 +123,7 @@ from ..core.remover import (
     on_same_volume,
     recover_interrupted,
     split_by_fraction,
+    split_cbr,
     split_protected,
     total_size,
 )
@@ -2047,6 +2049,8 @@ class MainWindow(QMainWindow):
 
         # Books in a protected folder are reviewed like any other, never rewritten.
         plans, protected = split_protected(plans, self.settings.protected_paths())
+        # So are .cbr and .cb7 books, with "Leave .cbr/.cb7 books unchanged" set.
+        plans, unchanged = split_cbr(plans) if self.settings.leave_cbr else (plans, [])
         # The command line's rule: a book losing more than a quarter of its pages
         # is two copies of one issue matching each other, not adverts. Emptying a
         # book is the extreme case. Those are listed and left alone.
@@ -2059,18 +2063,25 @@ class MainWindow(QMainWindow):
                     f"Every affected book would lose more than {DEFAULT_MAX_FRACTION:.0%} "
                     "of its pages, which usually means two copies of the same issue are "
                     "matching each other. Nothing was changed:\n\n" + _skipped_lines(skipped)
-                    + _protected_note(protected),
+                    + _protected_note(protected) + _unchanged_note(unchanged),
                 )
             else:
+                why = [
+                    reason for reason, books in (
+                        ("in a protected folder (Settings > Library)", protected),
+                        ("a .cbr or .cb7 left unchanged (Settings > Removing)", unchanged),
+                    ) if books
+                ]
                 QMessageBox.information(
                     self, "Nothing can be removed",
-                    "Every affected book is in a protected folder (Settings > Library), "
-                    "so nothing was changed." + _protected_note(protected),
+                    f"Every affected book is {' or '.join(why)}, so nothing was changed."
+                    + _protected_note(protected) + _unchanged_note(unchanged),
                 )
             return
 
         dialog = _ConfirmDialog(
-            plans, skipped, self.settings, self, protected=protected, scope=scope
+            plans, skipped, self.settings, self,
+            protected=protected, unchanged=unchanged, scope=scope,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -2952,6 +2963,7 @@ class _ConfirmDialog(QDialog):
         parent: QWidget,
         *,
         protected: list[RemovalPlan] | None = None,
+        unchanged: list[RemovalPlan] | None = None,
         scope: str = "",
     ) -> None:
         super().__init__(parent)
@@ -2960,6 +2972,7 @@ class _ConfirmDialog(QDialog):
         self._plans = plans
         self._skipped = skipped
         self._protected = protected or []
+        self._unchanged = unchanged or []
 
         total_pages = sum(len(p.remove_names) for p in plans)
         layout = QVBoxLayout(self)
@@ -3091,6 +3104,17 @@ class _ConfirmDialog(QDialog):
             self.protected_note.setWordWrap(True)
             layout.addWidget(self.protected_note)
 
+        self.unchanged_note: QLabel | None = None
+        if self._unchanged:
+            self.unchanged_note = QLabel(
+                f"<b>Leaving {len(self._unchanged)} .cbr/.cb7 book(s) unchanged</b> "
+                "(Settings > Removing): "
+                + html.escape(", ".join(p.archive.name for p in self._unchanged[:5]))
+                + (f" and {len(self._unchanged) - 5} more" if len(self._unchanged) > 5 else "")
+            )
+            self.unchanged_note.setWordWrap(True)
+            layout.addWidget(self.unchanged_note)
+
         self.chk_dry_run = QCheckBox("Dry run (report what would happen, change nothing)")
         layout.addWidget(self.chk_dry_run)
 
@@ -3115,6 +3139,7 @@ class _ConfirmDialog(QDialog):
     def records(self) -> list[dict]:
         left_out = [(p, SKIPPED_OVER_LIMIT) for p in self._skipped]
         left_out += [(p, SKIPPED_PROTECTED) for p in self._protected]
+        left_out += [(p, SKIPPED_CBR) for p in self._unchanged]
         return plan_records(self._plans, left_out, dry_run=self.dry_run())
 
     def save_plan(self, path: Path | None = None) -> tuple[Path, Path] | None:
@@ -3294,6 +3319,15 @@ def _protected_note(protected: list[RemovalPlan]) -> str:
     return (
         f"\n\n{len(protected)} book(s) in protected folders were left out: "
         + ", ".join(p.archive.name for p in protected[:5])
+    )
+
+
+def _unchanged_note(unchanged: list[RemovalPlan]) -> str:
+    if not unchanged:
+        return ""
+    return (
+        f"\n\n{len(unchanged)} .cbr/.cb7 book(s) were left unchanged: "
+        + ", ".join(p.archive.name for p in unchanged[:5])
     )
 
 

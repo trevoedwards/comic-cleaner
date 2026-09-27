@@ -23,6 +23,7 @@ from comiccleaner.core.archive import is_page_name  # noqa: E402
 from comiccleaner.core.grouping import WARN_MID_BOOK  # noqa: E402
 from comiccleaner.core.model import Decision  # noqa: E402
 from comiccleaner.core.pack import export_pack  # noqa: E402
+from comiccleaner.core.planfile import SKIPPED_CBR  # noqa: E402
 from comiccleaner.core.remover import RemovalPlan  # noqa: E402
 from comiccleaner.gui import main_window  # noqa: E402
 from comiccleaner.gui.history import HistoryDialog  # noqa: E402
@@ -387,6 +388,40 @@ def test_protected_folders_are_left_out_and_named(window, tmp_path, monkeypatch)
     assert "Leaving out 3 book(s)" in shown[0].protected_note.text()
     assert all(_pages(p) == 12 for p in safe.glob("*.cbz"))
     assert all(_pages(p) == 9 for p in (library / "open").glob("*.cbz"))
+
+
+def test_cbr_books_are_left_unchanged_when_set(window, tmp_path, monkeypatch):
+    """Settings > Removing > Leave .cbr and .cb7 books unchanged. A zip named
+    .cbr counts: it would otherwise be rewritten under its .cbr name."""
+    library = _three_ads(tmp_path / "lib")
+    cbr = library / "Book 2.cbr"
+    (library / "Book 2.cbz").rename(cbr)
+    before = cbr.read_bytes()
+    _scanned(window, library)
+    window.settings.leave_cbr = True
+    window._set_all_decisions(Decision.DELETE)
+    shown = _confirming(monkeypatch)
+
+    window.apply_removals()
+    _wait_for_removal(window)
+
+    assert "Leaving 1 .cbr/.cb7 book(s) unchanged" in shown[0].unchanged_note.text()
+    assert cbr.read_bytes() == before
+    assert not (library / "Book 2.cbz").exists()
+    assert sorted(_pages(p) for p in library.glob("*.cbz")) == [9, 9]
+    reasons = {Path(r["archive"]).name: r["reason"] for r in shown[0].records()}
+    assert reasons["Book 2.cbr"] == SKIPPED_CBR
+
+
+def test_leaving_cbr_books_unchanged_is_a_setting(qapp):
+    dialog = SettingsDialog(AppSettings(leave_cbr=True))
+    try:
+        assert dialog.leave_cbr.isChecked()
+        dialog.leave_cbr.setChecked(False)
+        assert dialog.result_settings().leave_cbr is False
+    finally:
+        dialog.deleteLater()
+    assert AppSettings().leave_cbr is False
 
 
 def test_quarantine_from_settings_keeps_copies(window, tmp_path, monkeypatch):

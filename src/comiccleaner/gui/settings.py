@@ -71,6 +71,8 @@ class AppSettings:
     output_dir: str = ""
     quarantine_dir: str = ""
     compress: bool = False
+    # .cbr and .cb7 books are reviewed but never rewritten or rebuilt as .cbz.
+    leave_cbr: bool = False
     theme: str = "system"
     thumb_size: int = THUMB_SIZE
     restore_session: bool = True
@@ -163,6 +165,7 @@ class AppSettings:
             output_dir=text("output_dir"),
             quarantine_dir=text("quarantine_dir"),
             compress=flag("compress"),
+            leave_cbr=flag("leave_cbr"),
             theme=text("theme"),
             thumb_size=thumb if thumb in sizes else THUMB_SIZE,
             restore_session=flag("restore_session"),
@@ -483,6 +486,14 @@ class SettingsDialog(QDialog):
         )
         form.addRow(self.remember_junk)
 
+        self.leave_cbr = QCheckBox("Leave .cbr and .cb7 books unchanged")
+        self.leave_cbr.setChecked(settings.leave_cbr)
+        self.leave_cbr.setToolTip(
+            "They are scanned and reviewed like any other book, and their matches "
+            "are listed, but they are never rewritten, so none is rebuilt as a .cbz."
+        )
+        form.addRow(self.leave_cbr)
+
         self.compress = QCheckBox("Deflate images when rebuilding (slower, rarely smaller)")
         self.compress.setChecked(settings.compress)
         form.addRow(self.compress)
@@ -557,6 +568,7 @@ class SettingsDialog(QDialog):
             output_dir=self.output_dir.value(),
             quarantine_dir=self.quarantine_dir.value(),
             compress=self.compress.isChecked(),
+            leave_cbr=self.leave_cbr.isChecked(),
             theme=str(self.theme.currentData()),
             thumb_size=int(self.thumb_size.currentData()),
             restore_session=self.restore_session.isChecked(),
