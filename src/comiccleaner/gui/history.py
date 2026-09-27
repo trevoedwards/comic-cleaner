@@ -175,7 +175,8 @@ class HistoryDialog(QDialog):
         by_id = self._items_by_id()
         chosen: dict[int, RunItem] = {}
         for node in self.tree.selectedItems():
-            nodes = [node.child(i) for i in range(node.childCount())] or [node]
+            children = (node.child(i) for i in range(node.childCount()))
+            nodes = [child for child in children if child is not None] or [node]
             for leaf in nodes:
                 item = by_id.get(leaf.data(0, ROLE_ITEM))
                 if item is not None:

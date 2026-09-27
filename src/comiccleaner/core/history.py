@@ -100,6 +100,8 @@ def record_run(
     for result in report.succeeded:
         if not result.removed or result.output is None:
             continue
+        size: int | None
+        mtime: int | None
         try:
             stat = result.output.stat()
             size, mtime = stat.st_size, stat.st_mtime_ns

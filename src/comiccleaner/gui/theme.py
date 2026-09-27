@@ -48,7 +48,7 @@ class Theme(enum.Enum):
 def system_is_dark() -> bool:
     """The OS-level preference, as best we can determine it."""
     app = QGuiApplication.instance()
-    if app is not None:
+    if isinstance(app, QGuiApplication):
         hints = app.styleHints()
         if hasattr(hints, "colorScheme"):
             scheme = hints.colorScheme()
@@ -87,8 +87,8 @@ def apply_theme(theme: Theme) -> None:
     global _is_dark
 
     app = QGuiApplication.instance()
-    if app is None:
-        return
+    if not isinstance(app, QGuiApplication):
+        return  # no GUI, so nothing to paint
 
     # The override goes first. While an earlier Light/Dark choice is still in force,
     # colorScheme() reports that choice rather than the OS, so asking for the

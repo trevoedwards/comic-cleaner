@@ -79,23 +79,8 @@ jobs:
 
       - name: Type check
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
-        # The tree still has older mypy errors, so for now only the files listed
-        # here are held clean. A crash (exit 2) always fails. Add files to the list
-        # as they are cleaned up, and drop the filter once the whole tree passes.
-        shell: bash
-        run: |
-          status=0
-          python -m mypy > mypy.txt 2>&1 || status=$?
-          cat mypy.txt
-          if [ "$status" -gt 1 ]; then
-            echo "::error::mypy did not finish (exit $status)"
-            exit 1
-          fi
-          gated='src/comiccleaner/(units|cli|core/archive|core/scanner|core/remover|gui/main_window|gui/preview|gui/remembered|gui/thumbs)\.py'
-          if grep -E "^${gated}:[0-9]+: error" mypy.txt; then
-            echo "::error::mypy found errors in files that are held clean"
-            exit 1
-          fi
+        # The whole package is held clean: any mypy error fails the job.
+        run: python -m mypy
 
       - name: Test with coverage
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'

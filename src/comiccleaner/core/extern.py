@@ -17,15 +17,17 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger(__name__)
 
 # Suppress the console window flash when shelling out on Windows. The keyword
 # does not exist on POSIX, so it is passed as **kwargs rather than as a literal
-# zero, which only happens to be tolerated.
-_QUIET_LAUNCH: dict[str, int] = (
-    {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
-)
+# zero, which only happens to be tolerated. Any, as subprocess.run's overloads
+# must still be matched by its other arguments.
+_QUIET_LAUNCH: dict[str, Any] = {}
+if sys.platform == "win32":
+    _QUIET_LAUNCH["creationflags"] = subprocess.CREATE_NO_WINDOW
 
 # The official build is 7zz on Linux and macOS; distributions call theirs 7z.
 _SEVENZIP_NAMES = ["7zz", "7z", "7za"]

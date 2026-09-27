@@ -516,7 +516,8 @@ class HashCache:
         bytes_freed, converted, output_size, output_mtime_ns). Returns the run id."""
         with self._lock, self.conn:
             cursor = self.conn.execute("INSERT INTO runs(source) VALUES (?)", (source,))
-            run_id = int(cursor.lastrowid)
+            run_id = cursor.lastrowid
+            assert run_id is not None  # always set after an INSERT
             self.conn.executemany(
                 "INSERT INTO run_items(run_id, archive, output, backup, removed, pages, "
                 "bytes_freed, converted, output_size, output_mtime_ns) "
