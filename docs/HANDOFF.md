@@ -19,6 +19,14 @@ Linux binaries). Since 0.2.0:
   screen (its minimum was about 1500 px). On Linux's Fusion style, dark-theme
   check boxes and placeholder text are visible.
 
+**On `master`, not yet released** (`1b11dca`, found by the Windows check
+below): the main window and the preview open no larger than the screen (they
+were fixed at 1400x860 and 1100x820, and on 1280x800 the preview's Close
+button was under the taskbar), and a selected row takes the selection's text
+colour under the Windows styles (it was black on navy in high contrast).
+Verified on Windows 11 with the CI build of that commit. It goes out with the
+next release.
+
 Development moved to a Linux machine and into Docker on 2026-09-27. `dev` runs
 the tests; `gui` serves the real window to a browser over noVNC (see
 [Development](development.md)).
@@ -46,9 +54,8 @@ The milestone is getting Comic Cleaner to users, after checking the platform
 most of them will use. There are no users yet: no issues or stars, and the
 downloads are our own. Features beyond this wait for their feedback.
 
-1. **Check 0.2.2 by hand on a real Windows 11 desktop** (next section). Every
-   GUI check so far ran on Linux, and the window-width fix was measured only
-   under Qt's offscreen platform there.
+1. **Done 2026-09-27: 0.2.2 checked by hand on Windows 11** (see "Tests that
+   still need running" for what that covered and what it found).
 2. **Publish to PyPI.** The name `comiccleaner` is not taken (checked
    2026-09-27). The owner creates the PyPI project and an API token and adds it
    as the `PYPI_TOKEN` secret; then run **PyPI package** (`pypi.yml`) from the
@@ -75,22 +82,35 @@ hook. Revisit once there is feedback.
 
 ## Tests that still need running
 
-On Windows 11, by hand, with `ComicCleaner-0.2.2-windows-x64.exe`. There is a
-Windows 11 VM at `~/VMs/pagemaster-win11` (SSH on port 2222), shared with
-PageMaster, so check it is free first.
+**Windows 11, done 2026-09-27** on the VM at `~/VMs/pagemaster-win11`
+(1280x800, 100%; shared with PageMaster, so ask its session first), with
+0.2.2 and then the CI build of `1b11dca`, by real clicks and screenshots:
 
-1. At 1920x1080 and 150% scaling, the window fits the screen and can be made
-   narrower than it opens.
-2. Dark and High contrast themes on the native style: check boxes in the page
-   grid and "Filter books" are readable (the 0.2.2 fix applies to Fusion only).
-3. With 7-Zip installed, `.cbr` and `.cb7` read; without any tool, the banner
-   names 7-Zip and WinRAR.
-4. Apply a removal: after the result box is closed, the rewritten books are
-   rescanned by themselves (the status line counts them all as scanned).
-5. History restore puts the books back, and the library rescans them.
+- Fits: the window can be made 987 px wide, well inside 1280. It opened at
+  1300x820, off the screen, and the preview's buttons were off the bottom;
+  fixed in `1b11dca` and checked (opens at 1272x743, preview whole).
+- Themes on the native style: dark check boxes and "Filter books" are fine.
+  High contrast drew the selected row black on navy; fixed and checked.
+- `.cbr` reads with no 7-Zip installed: Windows 10 and 11 ship `tar.exe`
+  (bsdtar 3.8), which reads RAR, so the "no tool" banner cannot appear there.
+  With a portable 7-Zip set by `COMICCLEANER_7Z`, Settings lists it.
+- Apply, then the rescan starts by itself after the result box (pages
+  249 to 244); History restore puts all 10 books back byte-identical.
 
-macOS has never been checked by hand; CI's self-test of the `.app` is the only
-check.
+Not checked: 150% scaling (the VM is at 100%, and it is PageMaster's to
+change). macOS has never been checked by hand; CI's self-test of the `.app`
+is the only check.
+
+How the VM was driven, for next time: SSH as `pm` (key and known_hosts in
+`~/VMs/pagemaster-win11/ssh/`, port 2222), everything in one folder under
+`C:\Users\pm`, launched in the desktop session through `C:\Books\run.ps1`,
+with a small PowerShell script of our own for clicks (`SetCursorPos`,
+`mouse_event`), keys (`SendKeys`) and screenshots (`CopyFromScreen`). Start
+the app with `Start-Process -WindowStyle Normal`: from a hidden-window process
+its main window comes up hidden. Afterwards remove the folder,
+`HKCU\Software\Playback Software\Comic Cleaner`,
+`%LOCALAPPDATA%\Playback Software\Comic Cleaner` and any `_MEI*` temp folder
+holding `comiccleaner`.
 
 ## Test content
 
@@ -110,7 +130,9 @@ finds 4 groups, 17 pages, 8.9 MB.
   fresh. The `xdotool` driving scripts used for the checks lived there too;
   `docker compose exec gui sh -c 'DISPLAY=:1 xdotool ...'` is the pattern.
 - **Cosmetic, not fixed:** in the group list, text starts at a different
-  offset depending on the thumbnail's width.
+  offset depending on the thumbnail's width. At the window's minimum width the
+  library column shrinks to about 75 px ("Batman: ..."). In Settings, the
+  UnRAR row shows `7z.exe` when there is no UnRAR, since 7-Zip reads RAR too.
 - **Some files have CRLF line endings** from the Windows machine. Git
   normalizes them on commit (`.gitattributes`), so the warnings are harmless.
 - **More than one tool writes here:** Cursor has rules in `.cursor/rules/` and
