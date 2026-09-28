@@ -140,9 +140,10 @@ hook. Revisit once there is feedback.
   books, cleaned only the Batman `.cbz` ones, and left the `.cbr` files
   byte-identical; linked zoom kept an 800x1200 reference and a 600x900 copy on
   the same part of the page through the wheel, a drag, stepping and 1:1.
-- **Release notes**: there is no CHANGELOG; the GitHub release notes are
-  generated from the commits (`--generate-notes`). The owner may want a short
-  summary of what changed since 0.2.2 in the release description instead.
+- **Release notes** are in [CHANGELOG.md](../CHANGELOG.md), written for users
+  (2026-09-28). At release, replace "(unreleased)" with the date. CI still
+  publishes with `--generate-notes`, which gave 0.2.2 only a compare link, so
+  paste the 0.2.3 section into the release description, or have CI use it.
 - Release as before: set the version in `pyproject.toml` and
   `src/comiccleaner/__init__.py`, commit, tag `vX.Y.Z` and push the tag; CI
   checks the tag against both and publishes the binaries.

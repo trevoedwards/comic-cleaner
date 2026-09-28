@@ -181,6 +181,7 @@ adverts; review those in the app.
 - [Safety](docs/safety.md)
 - [Building a binary](docs/building.md) — including the optional signing and PyPI workflows
 - [Development](docs/development.md)
+- [Changelog](CHANGELOG.md): what changed in each release
 
 ## Credits
 
