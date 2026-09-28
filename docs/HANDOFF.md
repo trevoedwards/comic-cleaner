@@ -101,15 +101,19 @@ the tests; `gui` serves the real window to a browser over noVNC, and has
 
 The milestone is getting Comic Cleaner to users, after checking the platform
 most of them will use. There are no users yet: no issues or stars, and the
-downloads are our own. Features beyond this wait for their feedback.
+downloads are our own. Features beyond this wait for their feedback. Both
+steps that would reach users are on hold at the owner's request (the
+announcement since 2026-09-27, PyPI since 2026-09-28), so for now the work
+is the owner's to choose.
 
 1. **Done: the Windows 11 check** (2026-09-27).
-2. **Publish to PyPI.** The name `comiccleaner` is not taken (checked
-   2026-09-27). The owner creates the PyPI project and an API token and adds it
-   as the `PYPI_TOKEN` secret; then run **PyPI package** (`pypi.yml`) from the
-   Actions tab. Check it in a clean container:
-   `docker run --rm python:3.12 pip install comiccleaner && comiccleaner --help`.
-   Then give the README a `pip install comiccleaner` line.
+2. **Publish to PyPI: deferred** (owner, 2026-09-28). Leave it until they ask.
+   When it comes back: the name `comiccleaner` was free on 2026-09-27; the
+   owner creates the PyPI project and an API token and adds it as the
+   `PYPI_TOKEN` secret; then run **PyPI package** (`pypi.yml`) from the Actions
+   tab, check it in a clean container
+   (`docker run --rm python:3.12 pip install comiccleaner && comiccleaner --help`),
+   and give the README a `pip install comiccleaner` line.
 3. **Announce it: on hold.** Drafts exist (a Reddit post, a short Discord
    and forum post, title options, a pre-posting checklist and a 0.2.2
    screenshot), but the owner is not announcing releases yet (2026-09-27).
