@@ -6,8 +6,10 @@ This file covers the state of the work.
 
 ## Where things are
 
-**0.2.2 is released** (tag `v0.2.2`, GitHub release with Windows, macOS and
-Linux binaries). Since 0.2.0:
+**0.2.3 is released** (tag `v0.2.3`, 2026-09-28, GitHub release with Windows,
+macOS and Linux binaries, its notes taken from [CHANGELOG.md](../CHANGELOG.md)).
+Its Linux binary passed its self-test on Debian 12 with the official 7-Zip.
+Since 0.2.0:
 
 - 0.2.1: the library selection survives folding a heading, confirmation lines
   show file names only, and the scan's time left goes by bytes, not books.
@@ -19,9 +21,9 @@ Linux binaries). Since 0.2.0:
   screen (its minimum was about 1500 px). On Linux's Fusion style, dark-theme
   check boxes and placeholder text are visible.
 
-**On `master`, not yet released** (all 2026-09-27; CI green on `0f35309`,
-with the strict type check). The owner wants to keep working before the next
-release: do not bump the version or push a tag until they ask.
+- 0.2.3, **released 2026-09-28**, is everything below (CI green on every
+  job, with no warnings). Nothing is on `master` beyond it yet. Do not bump the
+  version or push a tag until the owner asks for a release.
 
 - **Windows fixes** (`1b11dca`, found by the Windows check below): the main
   window and the preview open no larger than the screen (they were fixed at
@@ -130,6 +132,8 @@ support, and Komga/Kavita integration beyond the post-import `clean --known`
 hook. Revisit once there is feedback.
 
 ## Before the next release
+
+(Kept from 0.2.3 as the checklist for the next one.)
 
 - **Done 2026-09-27: Windows 11 check of everything on `master`**, with the CI
   build of `0f35309` on the VM (1280x800, 100%), by real clicks and
