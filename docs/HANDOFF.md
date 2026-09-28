@@ -28,11 +28,29 @@ version number is the owner's to choose):
   display using its own xcb libraries and passed its self-test on bare
   Debian 12, Ubuntu 24.04 and Fedora 42 containers; the CI build (`614fa08`)
   passed on bare Ubuntu 22.04 (glibc 2.35) and Debian 12. Nothing was
-  installed in those containers, so `.cbr` needed 7-Zip there, as everywhere. Not verified: FUSE mounting on a real desktop, since Docker has
-  no FUSE; CI and the containers run it with `APPIMAGE_EXTRACT_AND_RUN=1`.
+  installed in those containers, so `.cbr` needed 7-Zip there, as everywhere.
+  Not verified: FUSE mounting on a real desktop, since Docker has no FUSE; CI
+  and the containers run it with `APPIMAGE_EXTRACT_AND_RUN=1`.
 - **Qt's xcb-util libraries are bundled** in both Linux builds: CI's Linux
   build and the Dockerfile's `dev` stage install them, so PyInstaller carries
   them. Before, only `libxcb-cursor0` was.
+
+### Done on 2026-09-28
+
+1. **Release notes** (`406aec3`): a user-facing [CHANGELOG.md](../CHANGELOG.md),
+   linked from the README.
+2. **CI** (`179f576`): the release takes its notes from the CHANGELOG
+   (`build.py --release-notes`, unwrapped for GitHub, checked on a tag before
+   the builds); the actions moved to their Node 24 majors, ending the
+   deprecation warnings; the Ubuntu jobs were pinned to 24.04 ahead of
+   `ubuntu-latest` becoming 26.04. The "continuous failures" the owner saw
+   were three runs from 2026-09-27, each fixed by the next commit, and the
+   warnings on every run since.
+3. **0.2.3 released** (`0b84768`, tag `v0.2.3`) and its Linux binary checked on
+   Debian 12.
+4. **PyPI deferred** at the owner's request, alongside the announcement.
+5. **A Linux AppImage** (`614fa08`), on `master` for the next release.
+6. This handoff rewritten around the release, and kept up to date.
 
 Releases so far:
 
@@ -148,7 +166,8 @@ is the owner's to choose.
    nothing to install. Redistribution is allowed with 7-Zip's licence text.
    The AppImage is the natural first place: on a bare distro it reads `.cbz`
    and `.cb7` with nothing installed, but not `.cbr`.
-   Costs: a few MB per platform (the binaries are 47-104 MB), keeping the
+   Costs: a few MB per platform (the binaries are 47-105 MB, the AppImage
+   98 MB), keeping the
    bundled copy patched (7-Zip has had real CVEs, such as CVE-2025-0411), and
    nothing changes for a PyPI install. Decide with user feedback. Writing our
    own RAR reader or writer was considered and rejected: CBZ is the output
@@ -185,10 +204,17 @@ official 7-Zip (the AppImage with `APPIMAGE_EXTRACT_AND_RUN=1` in Docker).
 
 ## CI
 
-- **Green, with no warnings**, as of 0.2.3. Before that, three runs failed on
-  2026-09-27 and each was fixed by the next commit: a window-width test
-  measured in pixels (Windows' offscreen fonts are about 1.7x wider), a
-  deliberate diagnostic run on a temporary branch, and a mypy error.
+- **Green, with no warnings**, through `614fa08` (the AppImage). Before 0.2.3,
+  three runs failed on 2026-09-27 and each was fixed by the next commit: a
+  window-width test measured in pixels (Windows' offscreen fonts are about 1.7x
+  wider), a deliberate diagnostic run on a temporary branch, and a mypy error.
+- **The Linux build job** installs Qt's xcb-util libraries so PyInstaller
+  bundles them, builds the one-file binary, then `build.py --appimage
+  --smoke-test` and the AppImage's `--self-test` (with
+  `APPIMAGE_EXTRACT_AND_RUN=1`, as the runner has no FUSE), and packages both.
+  To move appimagetool or the AppImage runtime on, change the URL and SHA-256
+  together in `build.py` (`APPIMAGETOOL_*`, `APPIMAGE_RUNTIME_*`); a pin that
+  names "continuous" or "latest" fails `tests/test_build.py`.
 - **Actions** are on their Node 24 majors (checkout 7, setup-python 7,
   upload-artifact 7, download-artifact 8, 2026-09-28), which ended seven Node 20
   deprecation warnings a run. None of their breaking changes touch how they
@@ -266,6 +292,10 @@ finds 4 groups, 17 pages, 8.9 MB.
   comics, the app's settings and history, and screenshots. Delete it to start
   fresh. `docker compose exec gui sh -c 'DISPLAY=:1 xdotool ...'` is the
   pattern for driving it.
+- **`build/` and `dist/` are local build output** (gitignored). `build/tools/`
+  caches the pinned appimagetool and runtime, re-checked against their SHA-256
+  on each use; a local `dist/ComicCleaner-x86_64.AppImage` built in the `dev`
+  image needs glibc 2.36, not the 2.35 of CI's.
 - **Some files have CRLF line endings** from the Windows machine. Git
   normalizes them on commit (`.gitattributes`), so the warnings are harmless.
 - **More than one tool writes here:** Cursor has rules in `.cursor/rules/` and
