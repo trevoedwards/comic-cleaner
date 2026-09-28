@@ -5,13 +5,25 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1
 
+# The xcb-util libraries are for Qt's xcb plugin: PyInstaller bundles what it
+# finds, so without them here a Linux build would leave them out, and many
+# desktops lack them (libxcb-cursor0 above all).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libgl1 \
       libegl1 \
       libxkbcommon0 \
+      libxkbcommon-x11-0 \
       libdbus-1-3 \
       libglib2.0-0 \
       libxcb1 \
+      libxcb-cursor0 \
+      libxcb-icccm4 \
+      libxcb-image0 \
+      libxcb-keysyms1 \
+      libxcb-render-util0 \
+      libxcb-shape0 \
+      libxcb-util1 \
+      libxcb-xkb1 \
       xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
@@ -42,15 +54,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       novnc \
       websockify \
       fonts-dejavu-core \
-      libxkbcommon-x11-0 \
-      libxcb-cursor0 \
-      libxcb-icccm4 \
-      libxcb-image0 \
-      libxcb-keysyms1 \
       libxcb-randr0 \
-      libxcb-render-util0 \
-      libxcb-shape0 \
       libxcb-xinerama0 \
-      libxcb-xkb1 \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix

@@ -3,6 +3,23 @@
 What changed in each release of Comic Cleaner. Downloads are on the
 [releases page](https://github.com/trevoedwards/comic-cleaner/releases).
 
+## 0.3.0 (unreleased)
+
+### New
+
+- **A Linux AppImage.** `ComicCleaner-<version>-x86_64.AppImage` is one file
+  to download, make executable and run, with no tarball to unpack. It carries
+  the libraries Qt needs to open a window, including the X11 ones many desktops
+  lack, and has a desktop entry and icon for AppImage integration tools. It
+  mounts itself through FUSE; where that is missing, run it with
+  `--appimage-extract-and-run`. The tarball is still there.
+
+### Changed
+
+- The Linux tarball now carries the rest of the X11 (xcb-util) libraries Qt's
+  window support needs, not only `libxcb-cursor0`, so it starts on more
+  desktops.
+
 ## 0.2.3 (2026-09-28)
 
 ### New

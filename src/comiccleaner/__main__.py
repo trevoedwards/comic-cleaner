@@ -69,6 +69,9 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(sys.argv[:1])
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORGANISATION)
+    # Matches the AppImage's comiccleaner.desktop, so a Wayland desktop can tie the
+    # window to that entry and its icon.
+    app.setDesktopFileName("comiccleaner")
     # Set before any window exists so the taskbar entry picks it up.
     app.setWindowIcon(app_icon())
 

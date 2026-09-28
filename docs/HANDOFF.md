@@ -9,9 +9,29 @@ This file covers the state of the work.
 **0.2.3 is released** (tag `v0.2.3`, 2026-09-28): a GitHub release with Windows,
 macOS and Linux binaries, its notes taken from [CHANGELOG.md](../CHANGELOG.md).
 CI was green on every job, with no warnings, and the released Linux binary
-passed its self-test on Debian 12 with the official 7-Zip. **Nothing is on
-`master` beyond it.** The owner decides when the next release happens: do not
-bump the version or push a tag until they ask.
+passed its self-test on Debian 12 with the official 7-Zip. The owner decides
+when the next release happens: do not bump the version or push a tag until
+they ask.
+
+**On `master`, not yet released** (CHANGELOG `## 0.3.0 (unreleased)`; the
+version number is the owner's to choose):
+
+- **A Linux AppImage** (2026-09-28). `build.py --appimage` makes a one-folder
+  build under `build/appimage/` (clear of the one-file `dist/ComicCleaner`),
+  puts it in an AppDir with `AppRun`, a `comiccleaner.desktop` entry and a
+  256 px icon, and packs it with appimagetool 1.9.1 and the type2 runtime
+  `20251108`, both pinned by SHA-256 in `build.py` and cached in `build/tools/`.
+  The app sets its desktop file name to `comiccleaner` to match. CI builds and
+  self-tests it on Ubuntu 22.04 (glibc 2.35) and publishes it as
+  `ComicCleaner-<version>-x86_64.AppImage` beside the tarball. 88 MB, against
+  the tarball's 104. Verified: it opened on a real X11 display using its own
+  xcb libraries, and its self-test passed on bare Debian 12, Ubuntu 24.04 and
+  Fedora 42 containers with nothing installed (`.cbr` needs 7-Zip there, as
+  everywhere). Not verified: FUSE mounting on a real desktop, since Docker has
+  no FUSE; CI and the containers run it with `APPIMAGE_EXTRACT_AND_RUN=1`.
+- **Qt's xcb-util libraries are bundled** in both Linux builds: CI's Linux
+  build and the Dockerfile's `dev` stage install them, so PyInstaller carries
+  them. Before, only `libxcb-cursor0` was.
 
 Releases so far:
 
@@ -121,11 +141,12 @@ is the owner's to choose.
 4. **Done: the testing gaps** (2026-09-27). Real RAR4 and RAR5 archives are read
    on every CI platform, and the preview's sides are linked while comparing. A
    scan of a real `.cbr` runs only locally, against `/comics`.
-5. **Optional: a Linux AppImage**, if people ask for something other than the
-   tarball.
+5. **Done 2026-09-28: a Linux AppImage** (above; not released yet).
 6. **Decide: bundle the official 7-Zip in the release binaries**, as
    PageMaster does with its 7-Zip sidecar, so `.cbr` and `.cb7` open with
    nothing to install. Redistribution is allowed with 7-Zip's licence text.
+   The AppImage is the natural first place: on a bare distro it reads `.cbz`
+   and `.cb7` with nothing installed, but not `.cbr`.
    Costs: a few MB per platform (the binaries are 47-104 MB), keeping the
    bundled copy patched (7-Zip has had real CVEs, such as CVE-2025-0411), and
    nothing changes for a PyPI install. Decide with user feedback. Writing our
@@ -158,7 +179,8 @@ minute. The release job publishes that section, unwrapped into whole
 paragraphs (GitHub shows every line break in a release description), with
 GitHub's generated compare link after it. `python build.py --release-notes
 X.Y.Z` previews exactly what will be published. Afterwards, download the Linux
-binary and run its `--self-test` on Debian 12 with the official 7-Zip.
+tarball and the AppImage and run each one's `--self-test` on Debian 12 with the
+official 7-Zip (the AppImage with `APPIMAGE_EXTRACT_AND_RUN=1` in Docker).
 
 ## CI
 

@@ -354,3 +354,77 @@ def test_every_changelog_heading_names_a_version_and_a_date_or_unreleased():
     for heading in headings:
         assert re.fullmatch(pattern, heading), heading
 
+
+# -- the Linux AppImage ---------------------------------------------------------
+
+
+def test_the_desktop_entry_launches_the_app_with_its_icon(build_module):
+    entry = build_module.desktop_entry("9.9.9").splitlines()
+
+    assert entry[0] == "[Desktop Entry]"
+    fields = dict(line.split("=", 1) for line in entry[1:] if line)
+    assert fields["Type"] == "Application"
+    assert fields["Name"] == "Comic Cleaner"
+    assert fields["Exec"].split()[0] == build_module.APP_NAME
+    assert fields["Icon"] == build_module.DESKTOP_ID
+    assert fields["Categories"].endswith(";")
+    assert fields["X-AppImage-Version"] == "9.9.9"
+
+
+def test_apprun_starts_the_one_folder_build_inside_the_appdir(build_module):
+    script = build_module.app_run()
+    assert script.startswith("#!/bin/sh\n")
+    assert f'"$here/usr/lib/{build_module.APP_NAME}/{build_module.APP_NAME}" "$@"' in script
+
+
+def test_the_app_names_the_same_desktop_file_as_the_appimage(build_module):
+    """On Wayland the window is tied to its .desktop entry, and so its icon, by this."""
+    source = (ROOT / "src" / "comiccleaner" / "__main__.py").read_text("utf-8")
+    assert f'setDesktopFileName("{build_module.DESKTOP_ID}")' in source
+
+
+def test_the_appimage_is_built_beside_the_one_file_build(build_module):
+    assert build_module.appimage_output() == ROOT / "dist" / "ComicCleaner-x86_64.AppImage"
+    # One-folder output of its own, so dist/ComicCleaner (one file) is left alone.
+    assert build_module.APPIMAGE_ROOT == ROOT / "build" / "appimage"
+
+
+def test_an_appimage_is_refused_off_linux(build_module, monkeypatch):
+    import argparse
+
+    monkeypatch.setattr(build_module, "IS_WINDOWS", True)
+    with pytest.raises(SystemExit, match="only be built on Linux"):
+        build_module.build_appimage(argparse.Namespace())
+
+
+def test_a_download_whose_digest_does_not_match_is_refused(build_module, tmp_path):
+    source = tmp_path / "tool"
+    source.write_bytes(b"not what was pinned")
+    dest = tmp_path / "cache" / "tool"
+
+    with pytest.raises(SystemExit, match="SHA-256"):
+        build_module._fetch(source.as_uri(), "0" * 64, dest)
+    assert not dest.exists()  # a bad download is not kept for next time
+
+
+def test_a_download_whose_digest_matches_is_kept_and_reused(build_module, tmp_path):
+    import hashlib
+
+    source = tmp_path / "tool"
+    source.write_bytes(b"the pinned tool")
+    digest = hashlib.sha256(b"the pinned tool").hexdigest()
+    dest = tmp_path / "cache" / "tool"
+
+    assert build_module._fetch(source.as_uri(), digest, dest).read_bytes() == b"the pinned tool"
+    source.unlink()  # a second call must not need the network again
+    assert build_module._fetch(source.as_uri(), digest, dest) == dest
+
+
+def test_the_pinned_tools_are_pinned_by_exact_version_and_digest(build_module):
+    for url, digest in (
+        (build_module.APPIMAGETOOL_URL, build_module.APPIMAGETOOL_SHA256),
+        (build_module.APPIMAGE_RUNTIME_URL, build_module.APPIMAGE_RUNTIME_SHA256),
+    ):
+        assert "continuous" not in url and "latest" not in url, url
+        assert len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)
+

@@ -5,10 +5,15 @@ Windows produces ComicCleaner.exe, macOS a ComicCleaner.app bundle, and Linux a
 single ComicCleaner executable.
 
     python build.py [--onedir] [--console | --cli] [--clean] [--smoke-test | --smoke-only]
+    python build.py --appimage [--smoke-test]      # Linux only
 
 --cli builds comiccleaner-cli, a console build for the scan and clean commands.
 Windows needs it because the normal exe is windowed; elsewhere the normal binary
 already works from a terminal.
+
+--appimage builds ComicCleaner-x86_64.AppImage in dist/: a one-folder build in
+an AppDir, packed by a pinned appimagetool. It is built under build/appimage/,
+so it does not collide with the one-file dist/ComicCleaner.
 """
 
 from __future__ import annotations
@@ -113,8 +118,10 @@ def add_data_argument() -> list[str]:
     return ["--add-data", f"{source}{separator}comiccleaner/assets"]
 
 
-def output_path(onedir: bool, *, cli: bool = False, console: bool = False) -> Path:
-    dist = ROOT / "dist"
+def output_path(
+    onedir: bool, *, cli: bool = False, console: bool = False, dist: Path | None = None
+) -> Path:
+    dist = dist or ROOT / "dist"
     name = CLI_NAME if cli else APP_NAME
     if IS_MACOS and not (cli or console):
         # --windowed on macOS always produces a .app bundle, onefile or onedir.
@@ -123,7 +130,8 @@ def output_path(onedir: bool, *, cli: bool = False, console: bool = False) -> Pa
     return dist / name / binary if onedir else dist / binary
 
 
-def build(args: argparse.Namespace) -> Path:
+def build(args: argparse.Namespace, dist: Path | None = None) -> Path:
+    """Run PyInstaller; into `dist` (with its own work and spec folders) if given."""
     python = venv_python()
     ensure_pyinstaller(python)
     name = CLI_NAME if args.cli else APP_NAME
@@ -151,6 +159,10 @@ def build(args: argparse.Namespace) -> Path:
         "--console" if (args.console or args.cli) else "--windowed",
         *icon_argument(),
     ]
+    if dist is not None:
+        work = dist.parent / "work"
+        command += ["--distpath", str(dist), "--workpath", str(work),
+                    "--specpath", str(dist.parent)]
     for module in EXCLUDED_MODULES:
         command += ["--exclude-module", module]
     command.append(str(ENTRY_POINT))
@@ -161,7 +173,7 @@ def build(args: argparse.Namespace) -> Path:
     if result.returncode != 0:
         raise SystemExit(f"PyInstaller failed with exit code {result.returncode}")
 
-    produced = output_path(args.onedir, cli=args.cli, console=args.console)
+    produced = output_path(args.onedir, cli=args.cli, console=args.console, dist=dist)
     if not produced.exists():
         raise SystemExit(f"Build reported success but {produced} is missing")
 
@@ -231,7 +243,9 @@ def smoke_test(produced: Path, seconds: int = 15) -> int:
     executable = _executable_within(produced)
     print(f"\nSmoke-testing {executable.name}...", flush=True)
 
-    environment = {**os.environ, "QT_QPA_PLATFORM": "offscreen"}
+    # APPIMAGE_EXTRACT_AND_RUN lets an AppImage run where FUSE is not available,
+    # as in CI and Docker; it means nothing to any other build.
+    environment = {**os.environ, "QT_QPA_PLATFORM": "offscreen", "APPIMAGE_EXTRACT_AND_RUN": "1"}
     # Output goes to files rather than pipes: a surviving grandchild keeps pipe
     # handles open, which would make a post-kill read block forever.
     with tempfile.TemporaryDirectory() as workspace:
@@ -350,6 +364,140 @@ def smoke_test_cli(produced: Path) -> int:
     return 0
 
 
+# -- the Linux AppImage ---------------------------------------------------------
+
+# appimagetool packs the AppDir; the runtime is the small launcher at the front of
+# every AppImage. Both are pinned and checked, as appimagetool would otherwise
+# fetch its runtime from a moving "continuous" release.
+APPIMAGETOOL_URL = (
+    "https://github.com/AppImage/appimagetool/releases/download/1.9.1/"
+    "appimagetool-x86_64.AppImage"
+)
+APPIMAGETOOL_SHA256 = "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+APPIMAGE_RUNTIME_URL = (
+    "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64"
+)
+APPIMAGE_RUNTIME_SHA256 = "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d"
+# The .desktop file's and icon's name, and the app's desktop file name (see
+# __main__), so a desktop can tie the running window to its entry.
+DESKTOP_ID = "comiccleaner"
+APPIMAGE_ROOT = ROOT / "build" / "appimage"
+
+
+def project_version() -> str:
+    text = (ROOT / "src" / "comiccleaner" / "__init__.py").read_text("utf-8")
+    match = re.search(r'^__version__ = "([^"]+)"', text, re.M)
+    if match is None:
+        raise SystemExit("No __version__ in src/comiccleaner/__init__.py")
+    return match.group(1)
+
+
+def app_run() -> str:
+    """The AppDir's entry point: run the one-folder build inside it."""
+    return (
+        "#!/bin/sh\n"
+        "# Comic Cleaner's AppImage entry point: the one-folder build in usr/lib.\n"
+        'here="$(dirname "$(readlink -f "$0")")"\n'
+        f'exec "$here/usr/lib/{APP_NAME}/{APP_NAME}" "$@"\n'
+    )
+
+
+def desktop_entry(version: str) -> str:
+    """The .desktop file, at the AppDir's top and in usr/share/applications."""
+    return "\n".join([
+        "[Desktop Entry]",
+        "Type=Application",
+        "Name=Comic Cleaner",
+        "GenericName=Comic page cleaner",
+        "Comment=Find and remove duplicate pages across comic archives",
+        f"Exec={APP_NAME} %F",
+        f"Icon={DESKTOP_ID}",
+        "Terminal=false",
+        "Categories=Graphics;Utility;",
+        "Keywords=comic;cbz;cbr;duplicate;advert;",
+        f"StartupWMClass={APP_NAME}",
+        f"X-AppImage-Version={version}",
+        "",
+    ])
+
+
+def appimage_output() -> Path:
+    return ROOT / "dist" / f"{APP_NAME}-x86_64.AppImage"
+
+
+def _fetch(url: str, sha256: str, dest: Path) -> Path:
+    """Download `url` to `dest` once, and refuse it unless its digest matches."""
+    import hashlib
+    import urllib.request
+
+    if not dest.exists() or hashlib.sha256(dest.read_bytes()).hexdigest() != sha256:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        print(f"Downloading {url}...", flush=True)
+        with urllib.request.urlopen(url, timeout=120) as response:
+            dest.write_bytes(response.read())
+    digest = hashlib.sha256(dest.read_bytes()).hexdigest()
+    if digest != sha256:
+        dest.unlink()
+        raise SystemExit(f"{dest.name}: SHA-256 {digest}, expected {sha256}")
+    return dest
+
+
+def _icon_png(size: int, dest: Path) -> None:
+    from PIL import Image  # the build environment has the app's own dependencies
+
+    with Image.open(ROOT / "src" / "comiccleaner" / "assets" / "icon.png") as image:
+        image.convert("RGBA").resize((size, size), Image.Resampling.LANCZOS).save(dest)
+
+
+def build_appimage(args: argparse.Namespace) -> Path:
+    """The one-folder build in an AppDir, packed into dist/ComicCleaner-x86_64.AppImage."""
+    if IS_WINDOWS or IS_MACOS:
+        raise SystemExit("An AppImage can only be built on Linux")
+    shutil.rmtree(APPIMAGE_ROOT, ignore_errors=True)
+    executable = build(
+        argparse.Namespace(**{**vars(args), "onedir": True, "cli": False, "console": False}),
+        dist=APPIMAGE_ROOT / "dist",
+    )
+    folder = executable.parent  # a one-folder build's executable sits inside it
+
+    appdir = APPIMAGE_ROOT / "AppDir"
+    shutil.copytree(folder, appdir / "usr" / "lib" / APP_NAME, symlinks=True)
+    run = appdir / "AppRun"
+    run.write_text(app_run(), "utf-8")
+    run.chmod(0o755)
+    version = project_version()
+    entry = desktop_entry(version)
+    (appdir / f"{DESKTOP_ID}.desktop").write_text(entry, "utf-8")
+    applications = appdir / "usr" / "share" / "applications"
+    applications.mkdir(parents=True)
+    (applications / f"{DESKTOP_ID}.desktop").write_text(entry, "utf-8")
+    icons = appdir / "usr" / "share" / "icons" / "hicolor" / "256x256" / "apps"
+    icons.mkdir(parents=True)
+    _icon_png(256, icons / f"{DESKTOP_ID}.png")
+    shutil.copy2(icons / f"{DESKTOP_ID}.png", appdir / f"{DESKTOP_ID}.png")
+    (appdir / ".DirIcon").symlink_to(f"{DESKTOP_ID}.png")
+
+    tools = ROOT / "build" / "tools"
+    tool = _fetch(APPIMAGETOOL_URL, APPIMAGETOOL_SHA256, tools / "appimagetool-1.9.1")
+    tool.chmod(0o755)
+    runtime = _fetch(APPIMAGE_RUNTIME_URL, APPIMAGE_RUNTIME_SHA256, tools / "runtime-20251108")
+    produced = appimage_output()
+    produced.parent.mkdir(parents=True, exist_ok=True)
+    produced.unlink(missing_ok=True)
+    # Unpacked on the fly, as FUSE may not be there (CI, Docker).
+    environment = {**os.environ, "ARCH": "x86_64", "APPIMAGE_EXTRACT_AND_RUN": "1"}
+    result = subprocess.run(
+        [str(tool), "--no-appstream", "--runtime-file", str(runtime), str(appdir),
+         str(produced)],
+        cwd=ROOT, env=environment,
+    )
+    if result.returncode != 0 or not produced.exists():
+        raise SystemExit(f"appimagetool failed with exit code {result.returncode}")
+    produced.chmod(0o755)
+    print(f"\nBuilt {produced.relative_to(ROOT)} ({produced.stat().st_size / 2**20:.1f} MB)")
+    return produced
+
+
 CHANGELOG = ROOT / "CHANGELOG.md"
 
 
@@ -443,6 +591,12 @@ def main() -> int:
         help="Skip building and only smoke-test what is already in dist/.",
     )
     parser.add_argument(
+        "--appimage",
+        action="store_true",
+        help="Linux only: build dist/ComicCleaner-x86_64.AppImage from a one-folder "
+        "build, alongside any one-file build.",
+    )
+    parser.add_argument(
         "--release-notes",
         metavar="VERSION",
         help="Print CHANGELOG.md's section for VERSION, for the release, and build "
@@ -457,6 +611,15 @@ def main() -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 1
         return 0
+
+    if args.appimage:
+        if args.smoke_only:
+            produced = appimage_output()
+            if not produced.exists():
+                raise SystemExit(f"Nothing to test: {produced} does not exist")
+            return smoke_test(produced)
+        produced = build_appimage(args)
+        return smoke_test(produced) if args.smoke_test else 0
 
     check = smoke_test_cli if args.cli else smoke_test
     if args.smoke_only:

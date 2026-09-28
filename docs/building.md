@@ -16,7 +16,25 @@ same on Windows and macOS, which is how CI builds those.
 | Windows | `dist/ComicCleaner.exe` | embedded `.ico` |
 | macOS | `dist/ComicCleaner.app` | embedded `.icns` |
 | Linux | `dist/ComicCleaner` | bundled PNG at runtime |
+| Linux, with `--appimage` | `dist/ComicCleaner-x86_64.AppImage` | `.desktop` entry and 256 px PNG |
 | Any, with `--cli` | `dist/comiccleaner-cli[.exe]` | embedded, as above |
+
+`--appimage` (Linux only) makes a one-folder build under `build/appimage/`, so
+it does not collide with the one-file `dist/ComicCleaner`, puts it in an AppDir
+with a `.desktop` entry and icon, and packs it with a pinned `appimagetool` and
+AppImage runtime, both checked against their SHA-256 and cached in
+`build/tools/`. `--appimage --smoke-test` launches the result:
+
+```bash
+docker compose run --rm dev python build.py --appimage --smoke-test
+```
+
+There is no FUSE in Docker or on CI, so there the AppImage runs with
+`APPIMAGE_EXTRACT_AND_RUN=1`, which unpacks it instead of mounting it. The
+`dev` image carries the xcb-util libraries Qt's xcb plugin needs, as CI's Linux
+build does, so PyInstaller bundles them. The glibc floor is the build
+machine's: CI builds on Ubuntu 22.04 (2.35); a build in the `dev` image
+(Debian 12) needs 2.36.
 
 `--cli` builds the console variant for the command line. Only Windows needs it
 (CI builds it there), and its smoke test runs a real `scan --json` rather than
@@ -44,7 +62,8 @@ fails within a minute, before anything is built. `python build.py
 
 The release carries `ComicCleaner-<version>-windows-x64.exe`,
 `comiccleaner-cli-<version>-windows-x64.exe`, `…-macos-arm64.zip`,
-`…-linux-x64.tar.gz` and a `SHA256SUMS.txt`.
+`…-linux-x64.tar.gz`, `ComicCleaner-<version>-x86_64.AppImage` and a
+`SHA256SUMS.txt`.
 
 ## Optional: signing and PyPI
 

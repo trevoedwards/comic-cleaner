@@ -33,8 +33,11 @@ a whole library at once, without unpacking anything by hand.
 
 - **Python 3.10+** (developed on 3.12), or just grab a prebuilt binary from the
   [Releases page](https://github.com/trevoedwards/comic-cleaner/releases/latest).
-- **Linux binary:** glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and
-  later).
+- **Linux:** the AppImage (`ComicCleaner-<version>-x86_64.AppImage`) is the
+  easiest: `chmod +x` it and run it. It carries its own libraries; it mounts
+  itself through FUSE, which desktops normally have, and without FUSE it runs
+  with `--appimage-extract-and-run`. There is also a plain tarball. Both need
+  glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and later).
 - **Optional:** the official [7-Zip](https://www.7-zip.org/), only for `.cbr` /
   `.cb7`; `.cbz` needs nothing. On Linux and macOS that is `7zz` from 7-zip.org:
   the 7-Zip that Debian, Ubuntu, Fedora and Homebrew ship is built without RAR
