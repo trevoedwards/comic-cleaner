@@ -23,11 +23,12 @@ version number is the owner's to choose):
   `20251108`, both pinned by SHA-256 in `build.py` and cached in `build/tools/`.
   The app sets its desktop file name to `comiccleaner` to match. CI builds and
   self-tests it on Ubuntu 22.04 (glibc 2.35) and publishes it as
-  `ComicCleaner-<version>-x86_64.AppImage` beside the tarball. 88 MB, against
-  the tarball's 104. Verified: it opened on a real X11 display using its own
-  xcb libraries, and its self-test passed on bare Debian 12, Ubuntu 24.04 and
-  Fedora 42 containers with nothing installed (`.cbr` needs 7-Zip there, as
-  everywhere). Not verified: FUSE mounting on a real desktop, since Docker has
+  `ComicCleaner-<version>-x86_64.AppImage` beside the tarball: 98 MB from CI,
+  against the tarball's 105. Verified: a local build opened on a real X11
+  display using its own xcb libraries and passed its self-test on bare
+  Debian 12, Ubuntu 24.04 and Fedora 42 containers; the CI build (`614fa08`)
+  passed on bare Ubuntu 22.04 (glibc 2.35) and Debian 12. Nothing was
+  installed in those containers, so `.cbr` needed 7-Zip there, as everywhere. Not verified: FUSE mounting on a real desktop, since Docker has
   no FUSE; CI and the containers run it with `APPIMAGE_EXTRACT_AND_RUN=1`.
 - **Qt's xcb-util libraries are bundled** in both Linux builds: CI's Linux
   build and the Dockerfile's `dev` stage install them, so PyInstaller carries
