@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -376,10 +377,41 @@ def release_notes(version: str, changelog: str) -> str:
     end = next(
         (i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines)
     )
-    body = "\n".join(lines[start + 1:end]).strip()
+    body = _unwrap(lines[start + 1:end]).strip()
     if not body:
         raise ValueError(f"CHANGELOG.md's {version} section is empty")
     return body + "\n"
+
+
+_BLOCK_START = re.compile(r"(#{1,6} |[-*+] |\d+[.)] |>|```|\|)")
+
+
+def _unwrap(lines: list[str]) -> str:
+    """Join the lines CHANGELOG.md wraps at 80 columns back into whole paragraphs.
+
+    GitHub shows a release's notes as it shows a comment, where every line
+    break is a break, so the wrapped text would break mid-sentence there.
+    Headings, list items, quotes, tables and blank lines still start a new
+    line, and code blocks are left alone.
+    """
+    out: list[str] = []
+    fenced = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            fenced = not fenced
+            out.append(line)
+            continue
+        joinable = (
+            not fenced and stripped and out and out[-1].strip()
+            and not _BLOCK_START.match(stripped)
+            and not out[-1].lstrip().startswith(("#", "```", "|"))
+        )
+        if joinable:
+            out[-1] = f"{out[-1].rstrip()} {stripped}"
+        else:
+            out.append(line)
+    return "\n".join(out)
 
 
 def main() -> int:

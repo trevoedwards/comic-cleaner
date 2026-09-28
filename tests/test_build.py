@@ -303,6 +303,25 @@ _CHANGELOG = """# Changelog
 """
 
 
+def test_release_notes_rejoin_wrapped_lines(build_module):
+    """GitHub breaks a release's notes at every newline, so wrapped text is joined."""
+    changelog = (
+        "## 1.0.0 (2026-10-01)\n\n"
+        "### Fixed\n\n"
+        "- A long item that wraps\n  onto a second line.\n"
+        "- A second item.\n\n"
+        "A paragraph that\nwraps too.\n\n"
+        "```bash\nkeep this\nas it is\n```\n"
+    )
+    assert build_module.release_notes("1.0.0", changelog) == (
+        "### Fixed\n\n"
+        "- A long item that wraps onto a second line.\n"
+        "- A second item.\n\n"
+        "A paragraph that wraps too.\n\n"
+        "```bash\nkeep this\nas it is\n```\n"
+    )
+
+
 def test_release_notes_are_the_versions_section_without_its_heading(build_module):
     notes = build_module.release_notes("0.2.3", _CHANGELOG)
     assert notes == "### New\n\n- A thing.\n"

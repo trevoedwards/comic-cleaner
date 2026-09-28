@@ -3,7 +3,7 @@
 What changed in each release of Comic Cleaner. Downloads are on the
 [releases page](https://github.com/trevoedwards/comic-cleaner/releases).
 
-## 0.2.3 (unreleased)
+## 0.2.3 (2026-09-28)
 
 ### New
 
