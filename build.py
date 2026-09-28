@@ -349,6 +349,39 @@ def smoke_test_cli(produced: Path) -> int:
     return 0
 
 
+CHANGELOG = ROOT / "CHANGELOG.md"
+
+
+def release_notes(version: str, changelog: str) -> str:
+    """The CHANGELOG.md section for `version`, without its heading.
+
+    CI publishes it as the release's notes. A section that is missing, empty
+    or still marked unreleased is refused, so a tag cannot publish a release
+    with no notes, or with notes nobody finished.
+    """
+    lines = changelog.splitlines()
+    heading = f"## {version}"
+    start = next(
+        (i for i, line in enumerate(lines)
+         if line == heading or line.startswith(heading + " ")),
+        None,
+    )
+    if start is None:
+        raise ValueError(f"CHANGELOG.md has no '{heading}' section")
+    if "unreleased" in lines[start].lower():
+        raise ValueError(
+            f"CHANGELOG.md still marks {version} as unreleased: put the release "
+            f"date in its heading, as '{heading} (YYYY-MM-DD)'"
+        )
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines)
+    )
+    body = "\n".join(lines[start + 1:end]).strip()
+    if not body:
+        raise ValueError(f"CHANGELOG.md's {version} section is empty")
+    return body + "\n"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -377,7 +410,21 @@ def main() -> int:
         action="store_true",
         help="Skip building and only smoke-test what is already in dist/.",
     )
+    parser.add_argument(
+        "--release-notes",
+        metavar="VERSION",
+        help="Print CHANGELOG.md's section for VERSION, for the release, and build "
+        "nothing. Fails if it is missing or still marked unreleased.",
+    )
     args = parser.parse_args()
+
+    if args.release_notes:
+        try:
+            sys.stdout.write(release_notes(args.release_notes, CHANGELOG.read_text("utf-8")))
+        except (OSError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        return 0
 
     check = smoke_test_cli if args.cli else smoke_test
     if args.smoke_only:
@@ -392,7 +439,7 @@ def main() -> int:
 
     hint = "python build.py --smoke-test"
     print(f"Verify it starts with: {hint}")
-    print("Note: .cbr/.cb7 support needs 7-Zip or unrar on the target machine.")
+    print("Note: .cbr/.cb7 support needs the official 7-Zip on the target machine.")
     return 0
 
 

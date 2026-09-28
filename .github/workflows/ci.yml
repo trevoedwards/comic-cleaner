@@ -27,17 +27,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Ubuntu pinned: ubuntu-latest moves to 26.04 from 2026-10-19, and the Qt
+        # libraries below are installed by package name. Move it on purpose.
+        os: [ubuntu-24.04, macos-latest, windows-latest]
         python: ["3.12"]
         include:
           # Prove the floor of the supported range still works.
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             python: "3.10"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -77,17 +79,23 @@ jobs:
       - name: Lint
         run: python -m ruff check .
 
+      - name: Check the release notes
+        # On a version tag, fail in a minute rather than after every build:
+        # the release takes its notes from this version's CHANGELOG.md section.
+        if: startsWith(github.ref, 'refs/tags/v') && matrix.os == 'ubuntu-24.04' && matrix.python == '3.12'
+        run: python build.py --release-notes "${GITHUB_REF_NAME#v}" > /dev/null
+
       - name: Type check
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.12'
         # The whole package is held clean: any mypy error fails the job.
         run: python -m mypy
 
       - name: Test with coverage
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.12'
         run: python -m pytest -q --cov=comiccleaner --cov-report=term-missing
 
       - name: Test
-        if: ${{ !(matrix.os == 'ubuntu-latest' && matrix.python == '3.12') }}
+        if: ${{ !(matrix.os == 'ubuntu-24.04' && matrix.python == '3.12') }}
         run: python -m pytest -q
 
       - name: Self-test the source tree
@@ -107,14 +115,14 @@ jobs:
             artifact: ComicCleaner-macos
           # The binary needs the glibc it was built against or newer. 22.04's
           # 2.35 lets it run on Ubuntu 22.04, Debian 12 and later; built on
-          # ubuntu-latest it refused to start on anything before glibc 2.38.
+          # ubuntu-24.04 it refused to start on anything before glibc 2.38.
           - os: ubuntu-22.04
             artifact: ComicCleaner-linux
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -202,7 +210,7 @@ jobs:
           esac
           ls -l release
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: release/*
@@ -214,12 +222,12 @@ jobs:
     # Only for version tags; ordinary pushes just build and test.
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write  # create the release and attach the files
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check the tag matches the project version
         run: |
@@ -230,17 +238,24 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: release
           merge-multiple: true
 
+      - name: Write the release notes
+        # This version's CHANGELOG.md section; build.py refuses a missing one,
+        # or one still marked unreleased.
+        run: python3 build.py --release-notes "${GITHUB_REF_NAME#v}" > "$RUNNER_TEMP/notes.md"
+
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+        # The CHANGELOG section first; GitHub's generated notes, the list of
+        # changes and the compare link, are appended after it.
         run: |
           cd release
           sha256sum * > SHA256SUMS.txt
           gh release create "$GITHUB_REF_NAME" * \
             --title "Comic Cleaner ${GITHUB_REF_NAME#v}" \
-            --generate-notes --verify-tag
+            --notes "$(cat "$RUNNER_TEMP/notes.md")" --generate-notes --verify-tag

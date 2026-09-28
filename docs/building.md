@@ -29,16 +29,22 @@ just launching it.
 ## Publishing a release
 
 Set the same version in `pyproject.toml` and `src/comiccleaner/__init__.py`,
-commit, then tag and push:
+give that version's section in [CHANGELOG.md](../CHANGELOG.md) its date in place
+of "(unreleased)", commit, then tag and push:
 
 ```bash
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
 CI builds every platform and, if the tag matches both version numbers, publishes
-a GitHub release with `ComicCleaner-<version>-windows-x64.exe`,
-`comiccleaner-cli-<version>-windows-x64.exe`,
-`…-macos-arm64.zip`, `…-linux-x64.tar.gz` and a `SHA256SUMS.txt`.
+a GitHub release. Its notes are that CHANGELOG section, with GitHub's generated
+list of changes after it; a tag whose section is missing or still unreleased
+fails within a minute, before anything is built. `python build.py
+--release-notes 0.2.3` shows what would be published.
+
+The release carries `ComicCleaner-<version>-windows-x64.exe`,
+`comiccleaner-cli-<version>-windows-x64.exe`, `…-macos-arm64.zip`,
+`…-linux-x64.tar.gz` and a `SHA256SUMS.txt`.
 
 ## Optional: signing and PyPI
 

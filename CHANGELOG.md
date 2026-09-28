@@ -47,7 +47,7 @@ What changed in each release of Comic Cleaner. Downloads are on the
   through their own `tar.exe` even without 7-Zip.
 - **Settings → Archive tools** lists UnRAR only when UnRAR itself is
   installed, instead of showing the 7-Zip path in that row.
-- The README explains [why a cleaned `.cbr` comes back as a `.cbz`](README.md#why-cbz)
+- The README explains [why a cleaned `.cbr` comes back as a `.cbz`](https://github.com/trevoedwards/comic-cleaner#why-cbz)
   and how to keep your originals untouched.
 
 ### Tested

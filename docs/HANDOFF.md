@@ -141,12 +141,19 @@ hook. Revisit once there is feedback.
   byte-identical; linked zoom kept an 800x1200 reference and a 600x900 copy on
   the same part of the page through the wheel, a drag, stepping and 1:1.
 - **Release notes** are in [CHANGELOG.md](../CHANGELOG.md), written for users
-  (2026-09-28). At release, replace "(unreleased)" with the date. CI still
-  publishes with `--generate-notes`, which gave 0.2.2 only a compare link, so
-  paste the 0.2.3 section into the release description, or have CI use it.
+  (2026-09-28), and CI publishes that version's section as the release notes,
+  with GitHub's generated list after it. At release, replace "(unreleased)" in
+  the heading with the date: a tag whose section is missing or unreleased
+  fails before the builds. `python build.py --release-notes 0.2.3` previews it.
 - Release as before: set the version in `pyproject.toml` and
-  `src/comiccleaner/__init__.py`, commit, tag `vX.Y.Z` and push the tag; CI
-  checks the tag against both and publishes the binaries.
+  `src/comiccleaner/__init__.py`, date the CHANGELOG section, commit, tag
+  `vX.Y.Z` and push the tag; CI checks the tag against both and publishes.
+- **CI housekeeping, done 2026-09-28**: the actions moved to their Node 24
+  majors (checkout and setup-python 7, upload-artifact 7, download-artifact 8),
+  ending seven deprecation warnings a run, and the Ubuntu jobs are pinned to
+  `ubuntu-24.04` because `ubuntu-latest` becomes 26.04 on 2026-10-19; move
+  them on purpose. The Linux build stays on `ubuntu-22.04` for glibc 2.35;
+  GitHub will retire that image in time, so plan its replacement.
 
 ## The Windows 11 check
 

@@ -44,10 +44,10 @@ jobs:
             echo "present=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: steps.creds.outputs.present == 'true'
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         if: steps.creds.outputs.present == 'true'
         with:
           python-version: "3.12"
@@ -73,6 +73,8 @@ jobs:
           security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERTIFICATE_PASSWORD" \
             -A -t cert -f pkcs12 -k "$keychain"
           security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain"
+          # Unquoted on purpose: each existing keychain becomes its own argument.
+          # shellcheck disable=SC2046
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
           rm "$RUNNER_TEMP/cert.p12"
 
@@ -92,7 +94,7 @@ jobs:
           mkdir release
           ditto -c -k --keepParent "$app" "release/ComicCleaner-$version-macos-arm64-signed.zip"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: steps.creds.outputs.present == 'true'
         with:
           name: ComicCleaner-macos-signed

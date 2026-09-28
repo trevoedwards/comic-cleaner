@@ -281,3 +281,57 @@ def test_new_7zip_variable_wins_over_the_old_one(tmp_path, monkeypatch):
     monkeypatch.setenv("COMICDEDUPE_7Z", str(old))
 
     assert extern._first_existing(["definitely-not-installed"], []) == str(new)
+
+
+# -- release notes from CHANGELOG.md --------------------------------------------
+
+_CHANGELOG = """# Changelog
+
+## 0.3.0 (unreleased)
+
+- Not out yet.
+
+## 0.2.3 (2026-10-01)
+
+### New
+
+- A thing.
+
+## 0.2.2 (2026-09-27)
+
+- Older.
+"""
+
+
+def test_release_notes_are_the_versions_section_without_its_heading(build_module):
+    notes = build_module.release_notes("0.2.3", _CHANGELOG)
+    assert notes == "### New\n\n- A thing.\n"
+
+
+def test_release_notes_refuse_a_missing_section(build_module):
+    with pytest.raises(ValueError, match="no '## 0.2.4' section"):
+        build_module.release_notes("0.2.4", _CHANGELOG)
+
+
+def test_release_notes_refuse_a_section_still_marked_unreleased(build_module):
+    with pytest.raises(ValueError, match="unreleased"):
+        build_module.release_notes("0.3.0", _CHANGELOG)
+
+
+def test_release_notes_do_not_take_a_longer_version_for_this_one(build_module):
+    changelog = "## 0.2.30 (2026-12-01)\n\n- Later.\n\n## 0.2.3 (2026-10-01)\n\n- This.\n"
+    assert build_module.release_notes("0.2.3", changelog) == "- This.\n"
+
+
+def test_every_changelog_heading_names_a_version_and_a_date_or_unreleased():
+    import re
+
+    headings = [
+        line for line in (ROOT / "CHANGELOG.md").read_text("utf-8").splitlines()
+        if line.startswith("## ")
+    ]
+    pattern = r"## \d+\.\d+\.\d+ \((\d{4}-\d{2}-\d{2}|unreleased)\)"
+    assert headings
+    for heading in headings:
+        assert re.fullmatch(pattern, heading), heading
+
