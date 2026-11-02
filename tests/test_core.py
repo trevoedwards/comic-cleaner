@@ -543,6 +543,18 @@ def test_conversion_without_backup_replaces_the_original(tmp_path: Path, monkeyp
     assert scan_archive(tmp_path / "book.cbz").page_count == 2
 
 
+def test_conversion_without_backup_keeps_a_rar_named_cbz(tmp_path: Path, monkeypatch) -> None:
+    """A RAR named .cbz converts onto its own path; dropping the source deleted the result."""
+    source = write_archive(tmp_path / "book.cbz", [make_page(seed=i) for i in range(3)])
+    _rar_pretender(monkeypatch)
+    plan = _plan(source, {"page002.jpg"}, 3)
+
+    result = apply_plan(plan, backup=BackupPolicy(enabled=False))
+
+    assert result.ok and result.converted
+    assert scan_archive(source).page_count == 2
+
+
 def test_failed_conversion_without_backup_keeps_the_original(
     tmp_path: Path, monkeypatch
 ) -> None:
