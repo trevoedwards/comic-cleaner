@@ -29,7 +29,11 @@ classifiers = [
 ]
 
 dependencies = [
-    "PySide6>=6.6",
+    # PySide6 6.12.0's Signal.emit() returns True without a reference, so every
+    # emit takes one from True until Python frees it and aborts. 3.12+ made True
+    # immortal (PEP 683), which hides it there; 3.10 and 3.11 crash.
+    "PySide6>=6.6,!=6.12.0; python_version < '3.12'",
+    "PySide6>=6.6; python_version >= '3.12'",
     "Pillow>=10.0",
     "numpy>=1.24",
 ]
