@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import sys
 import zipfile
 from pathlib import Path
 
 import pytest
 
 from comiccleaner.core import extern
-from comiccleaner.core.archive import ComicArchive, write_cbz
+from comiccleaner.core.archive import ArchiveError, ComicArchive, write_cbz
 from comiccleaner.core.model import ArchiveKind
 
 DATA = Path(__file__).parent / "data" / "rar"
@@ -91,7 +92,15 @@ def test_every_fixture_is_there_and_is_a_rar():
 @needs_a_reader
 @pytest.mark.parametrize("reader", READERS or ["none"])
 @pytest.mark.parametrize("name", sorted(EXPECTED))
-def test_each_rar_reader_gets_every_file_right(tmp_path, monkeypatch, reader, name):
+def test_each_rar_reader_gets_every_file_right(tmp_path, monkeypatch, request, reader, name):
+    unicode_names = name == "test_read_format_rar5_unicode.rar"
+    if sys.platform == "win32" and reader == "bsdtar" and unicode_names:
+        # Windows' tar.exe passes names through the ANSI code page, and from its
+        # libarchive 3.8.9 build (Windows 10.0.26100.33648) it skips every entry
+        # whose name falls outside it, regular files too, and exits 1. Nothing is
+        # extracted, so the book is rightly unreadable there without 7-Zip.
+        reason = "Windows' tar.exe skips names outside the ANSI code page"
+        request.applymarker(pytest.mark.xfail(raises=ArchiveError, strict=False, reason=reason))
     book = _as_book(tmp_path, name)
     _only(monkeypatch, reader)
 
