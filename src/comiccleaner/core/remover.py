@@ -845,6 +845,8 @@ def apply_plan(
 
         # Converting cbr to cbz with no backup: the source must still go, but only
         # once the replacement is in place - otherwise a failed rename loses both.
+        # A RAR or 7z named .cbz converts onto its own path, so the replacement
+        # is the source and there is nothing left to drop.
         drop_source = False
         if replacing_in_place and plan.archive.exists():
             if policy.enabled:
@@ -853,7 +855,7 @@ def apply_plan(
                 _move_aside(plan.archive, backup_target)
                 result.backup = backup_target
             else:
-                drop_source = result.converted
+                drop_source = result.converted and destination != plan.archive
 
         _apply_mode(tmp_path, original_mode)
         os.replace(tmp_path, destination)
